@@ -2,6 +2,8 @@
 
 **Your AI agents, in a box.**
 
+![robots working](./assets/main.png)
+
 `ai-korobok` spins up a disposable QEMU/libvirt VM preloaded with Python, Node.js, and
 Docker — a safe, throwaway sandbox for running AI agents, MCP servers, and whatever else
 you don't want loose on your host. KVM-accelerated when available, TCG when not, with
