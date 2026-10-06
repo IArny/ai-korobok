@@ -66,9 +66,40 @@ install_macos_deps() {
     log_warn "The Linux Ansible playbook is skipped; see docs/macos.md for details."
 }
 
+is_wsl() {
+    if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+        return 0
+    fi
+    if grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+wsl_guidance() {
+    log_info "Windows Subsystem for Linux (WSL) detected — using the Linux setup path."
+    if [[ ! -d /run/systemd/system ]]; then
+        log_warn "systemd is not running in this WSL distro, so libvirtd cannot be started automatically."
+        log_warn "Enable it by adding the following to /etc/wsl.conf, then run 'wsl --shutdown':"
+        log_warn "  [boot]"
+        log_warn "  systemd=true"
+    fi
+    if [[ ! -e /dev/kvm ]]; then
+        log_warn "/dev/kvm not available — VMs will use TCG (software emulation)."
+        log_warn "For KVM acceleration, enable nested virtualization in %UserProfile%\\.wslconfig:"
+        log_warn "  [wsl2]"
+        log_warn "  nestedVirtualization=true"
+        log_warn "Then run 'wsl --shutdown' and reopen WSL. See docs/windows.md."
+    fi
+}
+
 if [[ "$(uname -s)" == "Darwin" ]]; then
     install_macos_deps
     exit 0
+fi
+
+if is_wsl; then
+    wsl_guidance
 fi
 
 if [[ ! -f "$PLAYBOOK" ]]; then

@@ -30,7 +30,8 @@ cp config.example.json config.json
 
 ## Prerequisites
 
-- Linux host: Ubuntu/Debian or Fedora, or macOS (see [macOS Support](docs/macos.md))
+- Linux host: Ubuntu/Debian or Fedora, macOS, or Windows via WSL2
+  (see [macOS Support](docs/macos.md) / [Windows Support](docs/windows.md))
 - Root/sudo access for initial setup
 - ~2GB free disk for cloud image + configured disk size
 - Internet connection for downloading the cloud image and VM packages
@@ -40,6 +41,12 @@ cp config.example.json config.json
 
 macOS hosts are supported through a Homebrew-based setup path; see
 [docs/macos.md](docs/macos.md) for installation steps and current limitations.
+
+## Windows Support
+
+Windows is supported via WSL2; libvirt and QEMU run inside the WSL2 Linux distribution.
+See [docs/windows.md](docs/windows.md) for setup steps, KVM/nested-virtualization
+details, and limitations.
 
 ## Commands
 
