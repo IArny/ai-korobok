@@ -1,0 +1,144 @@
+---
+- name: Setup QEMU/libvirt host for AI VM Manager
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars:
+    debian_packages:
+      - qemu-system-x86
+      - libvirt-daemon-system
+      - libvirt-clients
+      - virtinst
+      - cloud-image-utils
+      - guestfs-tools
+      - jq
+      - genisoimage
+      - iptables
+      - ebtables
+      - dnsmasq
+      - curl
+      - wget
+      - ovmf
+    fedora_packages:
+      - qemu-system-x86
+      - libvirt-daemon
+      - libvirt-daemon-driver-qemu
+      - libvirt-client
+      - virt-install
+      - cloud-utils
+      - guestfs-tools
+      - jq
+      - genisoimage
+      - iptables
+      - dnsmasq
+      - curl
+      - wget
+      - edk2-ovmf
+
+  tasks:
+    - name: Update apt cache (Debian/Ubuntu)
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Install QEMU and libvirt packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name: "{{ debian_packages }}"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Install QEMU and libvirt packages (Fedora)
+      ansible.builtin.dnf:
+        name: "{{ fedora_packages }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install ebtables (Fedora, best-effort)
+      ansible.builtin.dnf:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - ebtables-nft
+        - ebtables
+      when: ansible_os_family == "RedHat"
+      failed_when: false
+
+    - name: Enable and start libvirtd
+      ansible.builtin.systemd:
+        name: libvirtd
+        enabled: true
+        state: started
+
+    - name: Get real (non-root) username
+      ansible.builtin.set_fact:
+        real_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+    - name: Add user to libvirt group
+      ansible.builtin.user:
+        name: "{{ real_user }}"
+        groups: libvirt
+        append: true
+
+    - name: Autostart default libvirt network
+      ansible.builtin.command: virsh net-autostart default
+      changed_when: false
+      failed_when: false
+
+    - name: Start default libvirt network
+      ansible.builtin.command: virsh net-start default
+      changed_when: false
+      failed_when: false
+
+    - name: Check if /dev/kvm exists
+      ansible.builtin.stat:
+        path: /dev/kvm
+      register: kvm_device
+
+    - name: Set /dev/kvm permissions
+      ansible.builtin.file:
+        path: /dev/kvm
+        mode: "0666"
+      when: kvm_device.stat.exists
+
+    - name: Warn about missing KVM
+      ansible.builtin.debug:
+        msg: >-
+          /dev/kvm not found. VMs will use TCG (software emulation).
+          To enable: modprobe kvm_intel (or kvm_amd) on bare metal.
+      when: not kvm_device.stat.exists
+
+    - name: Verify qemu installation
+      ansible.builtin.command: qemu-system-x86_64 --version
+      register: qemu_ver
+      changed_when: false
+
+    - name: Verify virsh installation
+      ansible.builtin.command: virsh --version
+      register: virsh_ver
+      changed_when: false
+
+    - name: Verify cloud-localds installation
+      ansible.builtin.command: which cloud-localds
+      register: cloud_localds_path
+      changed_when: false
+
+    - name: Verify jq installation
+      ansible.builtin.command: jq --version
+      register: jq_ver
+      changed_when: false
+
+    - name: Show installation summary
+      ansible.builtin.debug:
+        msg:
+          - "qemu:         {{ (qemu_ver.stdout_lines | first) }}"
+          - "virsh:        {{ virsh_ver.stdout }}"
+          - "cloud-localds: {{ cloud_localds_path.stdout }}"
+          - "jq:           {{ jq_ver.stdout }}"
+
+    - name: Remind about group membership
+      ansible.builtin.debug:
+        msg: >-
+          Log out and back in for libvirt group membership to take effect.
+          {{ 'KVM acceleration is available.' if kvm_device.stat.exists else 'TCG emulation mode (no /dev/kvm).' }}

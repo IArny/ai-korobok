@@ -1,0 +1,24 @@
+# User config (copy from config.json.example)
+config.json
+
+# Runtime state
+.state/
+
+# SSH keys (auto-generated)
+keys/
+
+# Disk images
+*.qcow2
+*.img
+
+# Cloud-init ISOs
+*.iso
+
+# Export tarballs
+*.tar.gz
+
+# Ansible retry files
+*.retry
+
+
+.venv/

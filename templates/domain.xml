@@ -1,0 +1,74 @@
+<domain type='__DOMAIN_TYPE__'>
+  <name>__VM_NAME__</name>
+  <memory unit='MiB'>__MEMORY_MB__</memory>
+  <vcpu placement='static'>__VCPUS__</vcpu>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='__MACHINE_TYPE__'>hvm</type>
+    <firmware>
+      <feature enabled='yes' name='enrolled-keys'/>
+      <feature enabled='yes' name='secure-boot'/>
+    </firmware>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <vmport state='off'/>
+  </features>
+  <cpu mode='__CPU_MODE__' check='none'>
+    <topology sockets='1' dies='1' cores='__VCPUS__' threads='1'/>
+  </cpu>
+  <clock offset='utc'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' discard='unmap' detect-zeroes='unmap'/>
+      <source file='__DISK_PATH__'/>
+      <target dev='vda' bus='virtio'/>
+      <boot order='1'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='__SEED_ISO__'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <interface type='direct'>
+      <source dev='wlan0' mode='bridge'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'>
+        <model name='isa-serial'/>
+      </target>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+    </channel>
+    <input type='tablet' bus='usb'/>
+    <input type='keyboard' bus='usb'/>
+    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'>
+      <listen type='address' address='127.0.0.1'/>
+    </graphics>
+    <video>
+      <model type='virtio' heads='1' primary='yes'/>
+    </video>
+    <memballoon model='virtio'/>
+__VIRTIOFS_DEVICES__
+__GPU_DEVICES__
+  </devices>
+__QEMU_NAMESPACE__
+</domain>

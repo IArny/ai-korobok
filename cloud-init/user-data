@@ -1,0 +1,68 @@
+#cloud-config
+hostname: ai-vm
+manage_etc_hosts: true
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: false
+    passwd: __PASSWORD_HASH__
+    ssh_authorized_keys:
+      - __SSH_PUBLIC_KEY__
+
+ssh_pwauth: true
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - python3
+  - python3-pip
+  - python3-venv
+  - git
+  - curl
+  - wget
+  - htop
+  - ripgrep
+  - net-tools
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - build-essential
+  - linux-modules-extra-generic
+  - wireless-regdb
+
+runcmd:
+  - |
+    echo ">>> Installing Node.js 22 LTS..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    apt-get install -y nodejs
+  - |
+    echo ">>> Installing Docker CE..."
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    usermod -aG docker ubuntu
+  - |
+    echo ">>> Installing Python AI packages..."
+    pip3 install --break-system-packages openai anthropic httpx uvicorn fastapi pydantic
+  - |
+    echo ">>> Setting up shared directory..."
+    mkdir -p __MOUNT_POINT__
+    echo "__MOUNT_TAG__ __MOUNT_POINT__ virtiofs defaults 0 0" >> /etc/fstab
+  - |
+    echo ">>> Enabling Docker..."
+    systemctl enable docker
+    systemctl start docker
+  - |
+    echo ">>> Setup complete."
+
+power_state:
+  mode: reboot
+  delay: "now"
+  message: "Cloud-init setup complete, rebooting..."

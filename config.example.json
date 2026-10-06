@@ -1,0 +1,25 @@
+{
+  "vm_name": "ai-vm",
+  "vm_password": "ubuntu",
+  "vcpus": 4,
+  "memory_mb": 8192,
+  "disk_gb": 50,
+  "disk_path": "/var/lib/libvirt/images/ai-vm.qcow2",
+  "shared_dir": {
+    "host_path": "/home/dev/ai-workspace",
+    "mount_tag": "ai-workspace",
+    "mount_point": "/mnt/workspace"
+  },
+  "port_forwards": [
+    {"host": 2222, "guest": 22, "protocol": "tcp"},
+    {"host": 8080, "guest": 80, "protocol": "tcp"},
+    {"host": 3000, "guest": 3000, "protocol": "tcp"},
+    {"host": 3001, "guest": 3001, "protocol": "tcp"}
+  ],
+  "network": {
+    "type": "nat",
+    "wifi_interface": "wlp0s20f3"
+  },
+  "gpu_passthrough": false,
+  "os_variant": "ubuntu24.04"
+}
