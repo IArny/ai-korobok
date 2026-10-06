@@ -37,6 +37,14 @@
       - edk2-ovmf
 
   tasks:
+    - name: Require a Linux host
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family != "Darwin"
+        fail_msg: >-
+          This playbook targets Linux hosts. On macOS, setup.sh installs
+          dependencies through Homebrew, so it never invokes this playbook.
+
     - name: Update apt cache (Debian/Ubuntu)
       ansible.builtin.apt:
         update_cache: true

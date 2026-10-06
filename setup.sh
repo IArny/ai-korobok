@@ -7,9 +7,69 @@ VENV_DIR="${SCRIPT_DIR}/.venv"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+HOMEBREW_BIN=""
+MACOS_PACKAGES=(qemu libvirt cdrtools jq wget openssl@3)
+
+find_brew() {
+    if command -v brew &>/dev/null; then
+        HOMEBREW_BIN="$(command -v brew)"
+    elif [[ -x /opt/homebrew/bin/brew ]]; then
+        HOMEBREW_BIN=/opt/homebrew/bin/brew
+    elif [[ -x /usr/local/bin/brew ]]; then
+        HOMEBREW_BIN=/usr/local/bin/brew
+    else
+        return 1
+    fi
+    eval "$("$HOMEBREW_BIN" shellenv)"
+    return 0
+}
+
+install_homebrew() {
+    log_info "Homebrew not found. Installing..."
+    NONINTERACTIVE=1 /bin/bash -c \
+        "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+}
+
+install_macos_deps() {
+    if ! find_brew; then
+        install_homebrew
+    fi
+    if ! find_brew; then
+        log_error "Homebrew is required but was not found."
+        log_error "Install it manually: https://brew.sh"
+        exit 1
+    fi
+
+    log_info "Installing host dependencies via Homebrew: ${MACOS_PACKAGES[*]}"
+    "$HOMEBREW_BIN" install "${MACOS_PACKAGES[@]}"
+
+    if ! "$HOMEBREW_BIN" services list 2>/dev/null | grep -q '^libvirt.*started'; then
+        log_info "Starting libvirtd via brew services..."
+        "$HOMEBREW_BIN" services start libvirt || \
+            log_warn "Could not start libvirtd automatically. Start it with: brew services start libvirt"
+    fi
+
+    command -v qemu-system-x86_64 &>/dev/null || log_warn "qemu-system-x86_64 not found in PATH."
+    command -v virsh &>/dev/null || log_warn "virsh not found in PATH. Ensure Homebrew is on your PATH."
+
+    echo ""
+    log_info "macOS host dependencies installed."
+    log_info "  qemu:  $(qemu-system-x86_64 --version 2>/dev/null | head -1 || echo 'not found')"
+    log_info "  virsh: $(virsh --version 2>/dev/null || echo 'not found')"
+    log_warn "macOS uses QEMU with HVF acceleration — /dev/kvm and virtiofsd are unavailable."
+    log_warn "The Linux Ansible playbook is skipped; see docs/macos.md for details."
+}
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    install_macos_deps
+    exit 0
+fi
 
 if [[ ! -f "$PLAYBOOK" ]]; then
     log_error "Playbook not found: ${PLAYBOOK}"

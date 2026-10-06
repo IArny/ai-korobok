@@ -30,11 +30,16 @@ cp config.example.json config.json
 
 ## Prerequisites
 
-- Linux host: Ubuntu/Debian or Fedora
+- Linux host: Ubuntu/Debian or Fedora, or macOS (see [macOS Support](docs/macos.md))
 - Root/sudo access for initial setup
 - ~2GB free disk for cloud image + configured disk size
 - Internet connection for downloading the cloud image and VM packages
-- Ansible (auto-installed by `setup.sh` if missing)
+- Ansible (auto-installed by `setup.sh` if missing; not needed on macOS)
+
+## macOS Support
+
+macOS hosts are supported through a Homebrew-based setup path; see
+[docs/macos.md](docs/macos.md) for installation steps and current limitations.
 
 ## Commands
 

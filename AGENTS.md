@@ -18,6 +18,7 @@ and cloud-init templates.
 ├── vm.sh                  # Main CLI: create/start/stop/destroy/ssh/status/export/import/list-ports
 ├── setup.sh               # Host dependency installer; thin wrapper around the Ansible playbook
 ├── playbooks/setup.yml    # Installs QEMU/libvirt + host tools (Debian/Ubuntu and Fedora)
+├── docs/macos.md          # macOS setup notes (Homebrew path) and limitations
 ├── cloud-init/user-data   # Guest packages and provisioning (runs once, first boot)
 ├── cloud-init/meta-data   # Cloud-init meta-data
 ├── templates/domain.xml   # Reference libvirt domain XML (vm.sh generates its own)
