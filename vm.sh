@@ -58,9 +58,9 @@ load_config() {
 
     KEYS_DIR="${SCRIPT_DIR}/keys"
     SSH_KEY="${KEYS_DIR}/${VM_NAME}"
-    SEED_ISO="${STATE_DIR}/${VM_NAME}-seed.iso"
-    OVERLAY_PATH="${DISK_PATH}"
     DISK_DIR="$(dirname "$DISK_PATH")"
+    SEED_ISO="${DISK_DIR}/${VM_NAME}-seed.iso"
+    OVERLAY_PATH="${DISK_PATH}"
     BASE_IMAGE="${DISK_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
     DOMAIN_XML="${STATE_DIR}/${VM_NAME}.xml"
 }
@@ -187,8 +187,26 @@ generate_cloud_init() {
 
     cp "$meta_data_template" "$meta_data_out"
 
-    rm -f "$SEED_ISO"
-    cloud-localds "$SEED_ISO" "$user_data_out" "$meta_data_out"
+    if [[ ! -d "$DISK_DIR" ]]; then
+        if ! mkdir -p "$DISK_DIR" 2>/dev/null; then
+            sudo mkdir -p "$DISK_DIR"
+        fi
+    fi
+
+    if [[ -w "$DISK_DIR" ]]; then
+        rm -f "$SEED_ISO"
+        cloud-localds "$SEED_ISO" "$user_data_out" "$meta_data_out"
+    else
+        local tmp_seed="${STATE_DIR}/${VM_NAME}-seed.iso"
+        rm -f "$tmp_seed"
+        cloud-localds "$tmp_seed" "$user_data_out" "$meta_data_out"
+        sudo rm -f "$SEED_ISO"
+        sudo mv "$tmp_seed" "$SEED_ISO"
+    fi
+
+    if ! chmod 0644 "$SEED_ISO" 2>/dev/null; then
+        sudo chmod 0644 "$SEED_ISO"
+    fi
     log_info "Cloud-init seed ISO created: ${SEED_ISO}"
 }
 
@@ -719,6 +737,11 @@ cmd_destroy() {
     if [[ -f "$DISK_PATH" ]]; then
         rm -f "$DISK_PATH"
         log_info "Removed disk: ${DISK_PATH}"
+    fi
+
+    if [[ -f "$SEED_ISO" ]]; then
+        rm -f "$SEED_ISO" 2>/dev/null || sudo rm -f "$SEED_ISO"
+        log_info "Removed seed ISO: ${SEED_ISO}"
     fi
 
     rm -rf "$STATE_DIR"
