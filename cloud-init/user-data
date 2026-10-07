@@ -60,6 +60,24 @@ runcmd:
     systemctl enable docker
     systemctl start docker
   - |
+    echo ">>> Configuring local network route..."
+    LOCAL_NET="__LOCAL_NETWORK__"
+    if [ -n "$LOCAL_NET" ]; then
+      GW="__WIFI_GATEWAY__"
+      IFACE=$(ip -4 route get "$GW" 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+      if [ -n "$IFACE" ]; then
+        printf 'network:\n  version: 2\n  ethernets:\n    %s:\n      routes:\n        - to: %s\n          via: %s\n' \
+          "$IFACE" "$LOCAL_NET" "$GW" > /etc/netplan/60-local-network.yaml
+        chmod 600 /etc/netplan/60-local-network.yaml
+        netplan apply
+        echo ">>> Local route ${LOCAL_NET} via ${GW} on ${IFACE} configured."
+      else
+        echo ">>> WARNING: no interface found for gateway ${GW}; skipping local route."
+      fi
+    else
+      echo ">>> No local network detected; skipping local route."
+    fi
+  - |
     echo ">>> Setup complete."
 
 power_state:

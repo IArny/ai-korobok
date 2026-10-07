@@ -88,7 +88,7 @@ Edit `config.json` to customize the VM:
   ],
   "network": {
     "type": "nat",
-    "bridge": "virbr0"
+    "wifi_interface": "wlp0s20f3"
   },
   "gpu_passthrough": false,
   "os_variant": "ubuntu24.04"
@@ -102,6 +102,7 @@ Edit `config.json` to customize the VM:
 - **disk_gb**: Disk size in gigabytes (default: 50)
 - **shared_dir**: virtiofs host↔VM shared directory
 - **port_forwards**: List of host→guest port mappings
+- **network**: Networking mode and (optionally) the egress interface; see [Networking](#networking)
 - **gpu_passthrough**: Set to `true` to pass through a discrete GPU (requires IOMMU)
 
 ## What's Installed in the VM
@@ -128,6 +129,65 @@ Default forwards:
 - `localhost:8080` → VM `80` (HTTP)
 - `localhost:3000` → VM `3000` (app server)
 - `localhost:3001` → VM `3001` (MCP server)
+
+## Networking
+
+The `network` block controls how the VM reaches the outside world:
+
+```json
+"network": {
+  "type": "nat",
+  "wifi_interface": "wlp0s20f3"
+}
+```
+
+- **`type`** — `nat` (default) or `wifi-bridge`
+- **`wifi_interface`** — host network interface name; only used when `type` is `wifi-bridge`
+
+Find your interface name with `ip link` (WiFi adapters are usually `wl*`, Ethernet `en*`/`eth*`).
+
+### `nat` (default)
+
+The VM attaches to libvirt's `default` network (`virbr0`, `192.168.122.0/24`). Outbound
+traffic follows the **host's routing table**, so it takes whatever path the host uses
+(including a VPN). In this mode `wifi_interface` is ignored.
+
+### `wifi-bridge`
+
+Despite the name, this is not a layer-2 bridge — it creates a dedicated libvirt NAT
+network (`<vm_name>-wifi`, subnet `192.168.100.0/24`) whose forwarding is pinned to a
+specific host interface via `forward dev='<wifi_interface>'`. This forces VM egress out
+the named interface instead of following the host's default route.
+
+Requires `wifi_interface` to be set and the interface to exist on the host; otherwise
+`vm.sh create` / `vm.sh start` aborts. The name is a bit of a misnomer — an Ethernet
+interface works too, as long as the name matches a real interface.
+
+On first boot cloud-init also installs a guest route for the subnet auto-detected on
+`wifi_interface` via the wifi-bridge gateway, so LAN devices are reachable from inside
+the VM.
+
+### Accessing local network devices with a VPN on the host
+
+If the host has a VPN active, the default `nat` mode sends all VM traffic through the
+host's routing table — typically down the VPN tunnel. That means the VM may be unable to
+reach local LAN devices (NAS, printers, router admin, other machines), because the VPN
+captures the default route and/or blocks LAN access.
+
+To keep local network devices reachable while the host stays on VPN, use `wifi-bridge`
+and set `wifi_interface` to the interface actually connected to your LAN (WiFi or
+Ethernet):
+
+```json
+"network": {
+  "type": "wifi-bridge",
+  "wifi_interface": "wlp0s20f3"
+}
+```
+
+VM traffic is then forwarded out that interface, bypassing the host's VPN default route
+for the local segment. Note that this pins **all** VM egress to that interface, not just
+LAN-bound traffic.
 
 ## KVM Acceleration
 

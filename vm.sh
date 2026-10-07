@@ -52,6 +52,9 @@ load_config() {
     SHARED_MOUNT_POINT=$(jq -r '.shared_dir.mount_point // empty' "$CONFIG_FILE")
     NETWORK_TYPE=$(jq -r '.network.type // "nat"' "$CONFIG_FILE")
     WIFI_INTERFACE=$(jq -r '.network.wifi_interface // empty' "$CONFIG_FILE")
+    LOCAL_NETWORK=""
+    WIFI_NET_PREFIX="192.168.100"
+    WIFI_GATEWAY="${WIFI_NET_PREFIX}.1"
 
     KEYS_DIR="${SCRIPT_DIR}/keys"
     SSH_KEY="${KEYS_DIR}/${VM_NAME}"
@@ -118,6 +121,29 @@ detect_ovmf() {
     log_info "OVMF: code=${OVMF_CODE} vars=${OVMF_VARS}"
 }
 
+detect_local_network() {
+    if [[ "$NETWORK_TYPE" != "wifi-bridge" ]] || [[ -z "$WIFI_INTERFACE" ]]; then
+        LOCAL_NETWORK=""
+        return
+    fi
+
+    local cidr host prefix o1 o2 o3 o4 mask net
+    cidr=$(ip -4 -o addr show dev "$WIFI_INTERFACE" 2>/dev/null | awk '{print $4}' | head -1 || true)
+    if [[ -z "$cidr" ]]; then
+        log_warn "No IPv4 subnet detected on ${WIFI_INTERFACE}; skipping guest local route."
+        LOCAL_NETWORK=""
+        return
+    fi
+
+    host="${cidr%%/*}"
+    prefix="${cidr##*/}"
+    IFS=. read -r o1 o2 o3 o4 <<< "$host"
+    mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
+    net=$(( ((o1 << 24) | (o2 << 16) | (o3 << 8) | o4) & mask ))
+    LOCAL_NETWORK="$(( (net >> 24) & 255 )).$(( (net >> 16) & 255 )).$(( (net >> 8) & 255 )).$(( net & 255 ))/${prefix}"
+    log_info "Local network ${LOCAL_NETWORK} detected on ${WIFI_INTERFACE}; routing it via ${WIFI_GATEWAY}."
+}
+
 generate_ssh_key() {
     mkdir -p "$KEYS_DIR"
     if [[ -f "$SSH_KEY" ]]; then
@@ -154,6 +180,8 @@ generate_cloud_init() {
         -e "s|__PASSWORD_HASH__|${password_hash}|g" \
         -e "s|__MOUNT_POINT__|${SHARED_MOUNT_POINT}|g" \
         -e "s|__MOUNT_TAG__|${SHARED_MOUNT_TAG}|g" \
+        -e "s|__LOCAL_NETWORK__|${LOCAL_NETWORK}|g" \
+        -e "s|__WIFI_GATEWAY__|${WIFI_GATEWAY}|g" \
         "$user_data_template" > "$user_data_out"
 
     cp "$meta_data_template" "$meta_data_out"
@@ -481,7 +509,7 @@ define_wifi_network() {
     fi
 
     local bridge_name="virbr-${VM_NAME}"
-    local subnet="192.168.100"
+    local subnet="${WIFI_NET_PREFIX}"
     local mac_addr
     mac_addr=$(printf '52:54:00:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
 
@@ -532,6 +560,7 @@ cmd_create() {
     detect_kvm
     detect_qemu_machine
     detect_ovmf
+    detect_local_network
     generate_ssh_key
     download_cloud_image
     create_disk_overlay
