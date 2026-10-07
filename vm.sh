@@ -60,7 +60,8 @@ load_config() {
     SSH_KEY="${KEYS_DIR}/${VM_NAME}"
     SEED_ISO="${STATE_DIR}/${VM_NAME}-seed.iso"
     OVERLAY_PATH="${DISK_PATH}"
-    BASE_IMAGE="${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
+    DISK_DIR="$(dirname "$DISK_PATH")"
+    BASE_IMAGE="${DISK_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
     DOMAIN_XML="${STATE_DIR}/${VM_NAME}.xml"
 }
 
@@ -192,29 +193,69 @@ generate_cloud_init() {
 }
 
 download_cloud_image() {
+    if [[ ! -d "$DISK_DIR" ]]; then
+        if ! mkdir -p "$DISK_DIR" 2>/dev/null; then
+            sudo mkdir -p "$DISK_DIR"
+        fi
+    fi
+
+    LEGACY_IMAGE_MOVED=false
+    local legacy_image="${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
+    if [[ ! -f "$BASE_IMAGE" ]] && [[ -f "$legacy_image" ]]; then
+        log_info "Moving cached cloud image to libvirt storage: ${BASE_IMAGE}"
+        if [[ -w "$DISK_DIR" ]]; then
+            mv "$legacy_image" "$BASE_IMAGE"
+        else
+            sudo mv "$legacy_image" "$BASE_IMAGE"
+        fi
+        LEGACY_IMAGE_MOVED=true
+    fi
+
     if [[ -f "$BASE_IMAGE" ]]; then
         log_info "Using cached cloud image: ${BASE_IMAGE}"
-        return
+    else
+        local url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+        log_info "Downloading Ubuntu 24.04 cloud image..."
+        log_info "URL: ${url}"
+        if [[ -w "$DISK_DIR" ]]; then
+            wget -q --show-progress -O "$BASE_IMAGE" "$url"
+        else
+            local tmp="${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img.download"
+            wget -q --show-progress -O "$tmp" "$url"
+            sudo mv "$tmp" "$BASE_IMAGE"
+        fi
     fi
-    local url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
-    log_info "Downloading Ubuntu 24.04 cloud image..."
-    log_info "URL: ${url}"
-    wget -q --show-progress -O "$BASE_IMAGE" "$url"
-    log_info "Cloud image downloaded: ${BASE_IMAGE}"
+
+    if ! chmod 0644 "$BASE_IMAGE" 2>/dev/null; then
+        sudo chmod 0644 "$BASE_IMAGE"
+    fi
+    log_info "Cloud image ready: ${BASE_IMAGE}"
 }
 
 create_disk_overlay() {
     if [[ -f "$DISK_PATH" ]]; then
+        if [[ "${LEGACY_IMAGE_MOVED:-false}" == "true" ]]; then
+            log_info "Rebasing existing overlay onto moved cloud image..."
+            if [[ -w "$DISK_PATH" ]]; then
+                qemu-img rebase -u -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$DISK_PATH"
+            else
+                sudo qemu-img rebase -u -f qcow2 -F qcow2 -b "$BASE_IMAGE" "$DISK_PATH"
+            fi
+        fi
         log_info "Disk image already exists: ${DISK_PATH}"
         return
     fi
-    local disk_dir
-    disk_dir=$(dirname "$DISK_PATH")
-    if [[ ! -d "$disk_dir" ]]; then
-        sudo mkdir -p "$disk_dir"
+    if [[ ! -d "$DISK_DIR" ]]; then
+        if ! mkdir -p "$DISK_DIR" 2>/dev/null; then
+            sudo mkdir -p "$DISK_DIR"
+        fi
     fi
     log_info "Creating qcow2 overlay (${DISK_GB}GB)..."
-    qemu-img create -f qcow2 -b "$BASE_IMAGE" -F qcow2 "$DISK_PATH" "${DISK_GB}G"
+    if [[ -w "$DISK_DIR" ]]; then
+        qemu-img create -f qcow2 -b "$BASE_IMAGE" -F qcow2 "$DISK_PATH" "${DISK_GB}G"
+    else
+        sudo qemu-img create -f qcow2 -b "$BASE_IMAGE" -F qcow2 "$DISK_PATH" "${DISK_GB}G"
+    fi
     log_info "Disk overlay created: ${DISK_PATH}"
 }
 
