@@ -15,6 +15,7 @@
       - jq
       - genisoimage
       - iptables
+      - iptables-persistent
       - ebtables
       - dnsmasq
       - curl
@@ -31,6 +32,7 @@
       - jq
       - genisoimage
       - iptables
+      - iptables-services
       - dnsmasq
       - curl
       - wget
@@ -49,6 +51,17 @@
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Preseed iptables-persistent (Debian/Ubuntu)
+      ansible.builtin.debconf:
+        name: iptables-persistent
+        question: "{{ item }}"
+        vtype: boolean
+        value: "false"
+      loop:
+        - iptables-persistent/autosave_v4
+        - iptables-persistent/autosave_v6
       when: ansible_os_family == "Debian"
 
     - name: Install QEMU and libvirt packages (Debian/Ubuntu)
@@ -72,6 +85,12 @@
         - ebtables
       when: ansible_os_family == "RedHat"
       failed_when: false
+
+    - name: Enable iptables restore at boot (Fedora)
+      ansible.builtin.systemd:
+        name: iptables
+        enabled: true
+      when: ansible_os_family == "RedHat"
 
     - name: Enable and start libvirtd
       ansible.builtin.systemd:

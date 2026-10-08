@@ -189,6 +189,18 @@ VM traffic is then forwarded out that interface, bypassing the host's VPN defaul
 for the local segment. Note that this pins **all** VM egress to that interface, not just
 LAN-bound traffic.
 
+### Host firewall
+
+The VM reaches the internet through the host's `FORWARD` chain. If the host's default
+`FORWARD` policy is `DROP` (common with some Docker/firewall setups), the VM will have no
+connectivity and port forwards will not work.
+
+On `create`/`start`, `vm.sh` checks the policy and sets `iptables -P FORWARD ACCEPT` when
+it is not already `ACCEPT`, then persists the rules using `netfilter-persistent` on
+Debian/Ubuntu or `/etc/sysconfig/iptables` on Fedora (installed by `setup.sh`). Run
+`vm.sh` with `sudo` so the rules can be saved. If no persistence mechanism is available,
+the runtime change still applies but will not survive a reboot.
+
 ## KVM Acceleration
 
 If `/dev/kvm` is available, the VM uses hardware acceleration (KVM) for near-native performance. If not available (e.g., running inside a container), the VM falls back to TCG software emulation — functional but noticeably slower.

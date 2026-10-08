@@ -437,6 +437,40 @@ check_port_available() {
     return 0
 }
 
+ensure_forwarding() {
+    local policy
+    policy=$(iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD/ {print $3}' || true)
+    if [[ "$policy" != "ACCEPT" ]]; then
+        log_warn "Host FORWARD policy is '${policy:-unknown}' — setting to ACCEPT so VM traffic can be routed."
+        iptables -P FORWARD ACCEPT
+    fi
+    persist_forwarding
+}
+
+persist_forwarding() {
+    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+        log_warn "Not running as root — FORWARD policy will not persist across reboots."
+        log_warn "Re-run with sudo, e.g. sudo ./vm.sh create"
+        return
+    fi
+
+    if command -v netfilter-persistent &>/dev/null; then
+        if netfilter-persistent save &>/dev/null; then
+            log_info "Saved iptables rules via netfilter-persistent."
+        else
+            log_warn "Could not save iptables rules via netfilter-persistent."
+        fi
+    elif [[ -d /etc/sysconfig ]] && command -v iptables-save &>/dev/null; then
+        if iptables-save > /etc/sysconfig/iptables; then
+            log_info "Saved iptables rules to /etc/sysconfig/iptables."
+        else
+            log_warn "Could not save iptables rules to /etc/sysconfig/iptables."
+        fi
+    else
+        log_warn "No iptables persistence mechanism found — FORWARD policy will not persist."
+    fi
+}
+
 apply_port_forwards() {
     local vm_ip="$1"
     if [[ -z "$vm_ip" ]]; then
@@ -636,6 +670,7 @@ cmd_create() {
     virsh define "$DOMAIN_XML"
 
     define_wifi_network
+    ensure_forwarding
     start_virtiofsd
 
     log_info "Starting VM '${VM_NAME}'..."
@@ -675,6 +710,7 @@ cmd_start() {
 
     start_virtiofsd
     define_wifi_network
+    ensure_forwarding
     virsh start "$VM_NAME"
     log_info "VM '${VM_NAME}' started."
 
