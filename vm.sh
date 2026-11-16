@@ -185,6 +185,25 @@ generate_cloud_init() {
         -e "s|__WIFI_GATEWAY__|${WIFI_GATEWAY}|g" \
         "$user_data_template" > "$user_data_out"
 
+    local skill_src="${SCRIPT_DIR}/skills/backlog/SKILL.md"
+    if [[ ! -f "$skill_src" ]]; then
+        log_error "Global skill not found: ${skill_src}"
+        exit 1
+    fi
+    local skill_indented="${STATE_DIR}/backlog-skill.indented"
+    local user_data_tmp="${STATE_DIR}/user-data.tmp"
+    sed 's/^/      /' "$skill_src" > "$skill_indented"
+    awk -v skill="$skill_indented" '
+        /__BACKLOG_SKILL_CONTENT__/ {
+            while ((getline line < skill) > 0) print line
+            close(skill)
+            next
+        }
+        { print }
+    ' "$user_data_out" > "$user_data_tmp"
+    mv "$user_data_tmp" "$user_data_out"
+    rm -f "$skill_indented"
+
     cp "$meta_data_template" "$meta_data_out"
 
     if [[ ! -d "$DISK_DIR" ]]; then

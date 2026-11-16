@@ -13,6 +13,12 @@ users:
 
 ssh_pwauth: true
 
+write_files:
+  - path: /opt/opencode/skills/backlog/SKILL.md
+    permissions: '0644'
+    content: |
+__BACKLOG_SKILL_CONTENT__
+
 package_update: true
 package_upgrade: true
 
@@ -77,6 +83,10 @@ runcmd:
     else
       echo ">>> No local network detected; skipping local route."
     fi
+  - |
+    echo ">>> Installing backlog skill for opencode..."
+    install -d -o ubuntu -g ubuntu /home/ubuntu/.config/opencode/skills/backlog
+    install -o ubuntu -g ubuntu -m 0644 /opt/opencode/skills/backlog/SKILL.md /home/ubuntu/.config/opencode/skills/backlog/SKILL.md
   - |
     echo ">>> Setup complete."
 
