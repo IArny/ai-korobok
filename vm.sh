@@ -832,6 +832,43 @@ cmd_ssh() {
     fi
 }
 
+cmd_install_lancedb() {
+    load_config
+
+    if [[ ! -f "$SSH_KEY" ]]; then
+        log_error "SSH key not found: ${SSH_KEY}"
+        log_error "Run 'vm.sh create' first."
+        exit 1
+    fi
+
+    local state
+    state=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "undefined")
+    if [[ "$state" != "running" ]]; then
+        log_error "VM '${VM_NAME}' is not running (state: ${state})."
+        log_error "Run 'vm.sh start' first."
+        exit 1
+    fi
+
+    local installer="${SCRIPT_DIR}/scripts/install-lancedb.sh"
+    if [[ ! -f "$installer" ]]; then
+        log_error "Installer script not found: ${installer}"
+        exit 1
+    fi
+
+    local vm_ip
+    vm_ip=$(get_vm_ip 2>/dev/null) || true
+
+    log_info "Installing LanceDB + opencode-indexing in ${VM_NAME}..."
+    if [[ -n "$vm_ip" ]]; then
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@${vm_ip}" 'bash -s' < "$installer"
+    else
+        log_warn "IP not found via DHCP leases, trying localhost:2222..."
+        ssh -i "$SSH_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@localhost 'bash -s' < "$installer"
+    fi
+
+    log_info "LanceDB + opencode-indexing installed in ${VM_NAME}."
+}
+
 cmd_status() {
     load_config
     detect_kvm
@@ -1016,6 +1053,7 @@ usage() {
     echo "  stop        Graceful ACPI shutdown"
     echo "  destroy     Force stop, undefine, and delete disk images"
     echo "  ssh         SSH into the VM"
+    echo "  install-lancedb  Install LanceDB + opencode-indexing plugin in the VM"
     echo "  status      Show VM state, IP, resource usage"
     echo "  export      Package VM into a portable tarball"
     echo "  import <f>  Import a VM from a tarball"
@@ -1033,6 +1071,7 @@ main() {
         stop)       cmd_stop ;;
         destroy)    cmd_destroy ;;
         ssh)        cmd_ssh "$@" ;;
+        install-lancedb) cmd_install_lancedb ;;
         status)     cmd_status ;;
         export)     cmd_export ;;
         import)     cmd_import "${1:-}" ;;

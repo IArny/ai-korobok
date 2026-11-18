@@ -58,6 +58,9 @@ runcmd:
     echo ">>> Installing Python AI packages..."
     pip3 install --break-system-packages openai anthropic httpx uvicorn fastapi pydantic
   - |
+    echo ">>> Installing LanceDB..."
+    pip3 install --break-system-packages --ignore-installed lancedb pyarrow
+  - |
     echo ">>> Setting up shared directory..."
     mkdir -p __MOUNT_POINT__
     echo "__MOUNT_TAG__ __MOUNT_POINT__ virtiofs defaults 0 0" >> /etc/fstab
@@ -87,6 +90,15 @@ runcmd:
     echo ">>> Installing backlog skill for opencode..."
     install -d -o ubuntu -g ubuntu /home/ubuntu/.config/opencode/skills/backlog
     install -o ubuntu -g ubuntu -m 0644 /opt/opencode/skills/backlog/SKILL.md /home/ubuntu/.config/opencode/skills/backlog/SKILL.md
+  - |
+    echo ">>> Installing OpenCode v2 and opencode-indexing plugin..."
+    npm install -g @opencode/cli
+    install -d -o ubuntu -g ubuntu /home/ubuntu/.config/opencode
+    chown -R ubuntu:ubuntu /home/ubuntu/.config/opencode
+    su - ubuntu -c 'npx --yes @javierkaiser/opencode-indexing@latest --aio --no-restart' || true
+    if ! su - ubuntu -c 'opencode plugin list' | grep -qi 'javierkaiser'; then
+      su - ubuntu -c 'tmp=$(mktemp -d) && npm install --prefix "$tmp" --no-audit --no-fund --loglevel=error @javierkaiser/opencode-indexing@latest && node "$tmp/node_modules/@javierkaiser/opencode-indexing/install.mjs" --aio --no-restart; rc=$?; rm -rf "$tmp"; exit $rc'
+    fi
   - |
     echo ">>> Setup complete."
 

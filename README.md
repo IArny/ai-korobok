@@ -59,10 +59,21 @@ details, and limitations.
 | `./vm.sh stop`          | Graceful ACPI shutdown (60s timeout, then force)                            |
 | `./vm.sh destroy`       | Force stop + undefine + delete disk images + cleanup                        |
 | `./vm.sh ssh`           | SSH into the VM using auto-generated key                                    |
+| `./vm.sh install-lancedb` | Install LanceDB + opencode-indexing plugin in a running VM               |
 | `./vm.sh status`        | Show VM state, IP, resource usage, port forwards                            |
 | `./vm.sh export`        | Package qcow2 + XML + config + keys into a tarball                          |
 | `./vm.sh import <file>` | Unpack tarball, define domain, ready to start                               |
 | `./vm.sh list-ports`    | Show configured port forwarding rules                                       |
+
+### LanceDB + opencode-indexing
+
+`./vm.sh install-lancedb` installs the Python `lancedb` package and the
+`@javierkaiser/opencode-indexing` OpenCode plugin (embedded LanceDB semantic
+index) into a running VM. It requires OpenCode v2 (`@opencode/cli`), installs it
+if needed, and runs the plugin installer as the `ubuntu` user so it writes
+`~/.config/opencode/indexing.json` and registers with `opencode plugin add`.
+Newly created VMs already get both via cloud-init; use this command to
+add them to an existing VM. It is idempotent — safe to re-run.
 
 ## Configuration
 
@@ -111,8 +122,11 @@ The cloud-init provisioning automatically installs:
 
 - Python 3 + pip + venv
 - Node.js 22 LTS
+- OpenCode v2 CLI (`@opencode/cli`)
 - Docker CE + Docker Compose
 - Common AI packages: `openai`, `anthropic`, `httpx`, `uvicorn`, `fastapi`, `pydantic`
+- LanceDB: `lancedb` + `pyarrow` (Python) and the `@javierkaiser/opencode-indexing`
+  OpenCode plugin (embedded LanceDB semantic index, installed for the `ubuntu` user)
 - Git, curl, htop, ripgrep, build-essential
 
 ## Shared Directory

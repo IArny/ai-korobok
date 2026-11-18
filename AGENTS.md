@@ -20,6 +20,7 @@ and cloud-init templates.
 ├── playbooks/setup.yml    # Installs QEMU/libvirt + host tools (Debian/Ubuntu and Fedora)
 ├── docs/macos.md          # macOS setup notes (Homebrew path) and limitations
 ├── docs/windows.md        # Windows setup notes (WSL2 path) and limitations
+├── scripts/install-lancedb.sh  # Guest-side installer for LanceDB + opencode-indexing (run via `vm.sh install-lancedb`)
 ├── cloud-init/user-data   # Guest packages and provisioning (runs once, first boot)
 ├── cloud-init/meta-data   # Cloud-init meta-data
 ├── templates/domain.xml   # Reference libvirt domain XML (vm.sh generates its own)
@@ -45,6 +46,34 @@ Run/verify manually from this directory:
 - `./vm.sh ssh`
 
 Before committing shell changes, at minimum run `bash -n vm.sh setup.sh` to check syntax.
+
+## Debugging the VM
+
+Do not test lifecycle/destructive changes (`create`, `start`, `stop`, `destroy`,
+`install-lancedb`, cloud-init edits) against the user's existing VM.
+
+1. Copy the whole project into a throwaway directory (e.g.
+   `/tmp/ai-korobok-debug`). `SCRIPT_DIR`-relative state (`.state/`, `keys/`, seed
+   ISO, domain XML) stays inside that copy.
+2. In the copied `config.json`, change at least:
+   - `vm_name` → a debug name (e.g. `ai-vm-debug`)
+   - `disk_path` → a separate image (e.g.
+     `/var/lib/libvirt/images/ai-vm-debug.qcow2`)
+   - `port_forwards` → non-conflicting host ports (the main VM owns
+     2222/8080/3000/3001), so nothing collides with or overwrites the user's VM.
+3. Run and debug the VM from that copied directory only, then destroy the debug VM
+   and delete its disk/state when done.
+
+### Long-running and heavy processes
+
+- Run potentially slow or hanging operations (VM `create`, cloud-init, package
+  installs, plugin installers) as background tasks (`nohup`/`setsid`) and poll the
+  log instead of blocking the session.
+- Before starting VMs or other memory-heavy processes, check available memory
+  (`free -h`, `/proc/meminfo` `MemAvailable`) and size the debug VM to fit. Do not
+  run an 8 GB debug VM alongside the 8 GB `ai-vm` on a 7.7 GB host.
+- Use a unique `vm_name` and never destroy/start the user's `ai-vm` during debug
+  runs; restore it to its prior state when done.
 
 ## Conventions
 
