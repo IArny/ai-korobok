@@ -59,6 +59,8 @@ details, and limitations.
 | `./vm.sh stop`          | Graceful ACPI shutdown (60s timeout, then force)                            |
 | `./vm.sh destroy`       | Force stop + undefine + delete disk images + cleanup                        |
 | `./vm.sh ssh`           | SSH into the VM using auto-generated key                                    |
+| `./vm.sh backup-agent [archive]` | Sync agent state from the VM and write a portable archive          |
+| `./vm.sh restore-agent <archive> [--force]` | Restore agent state into the host and VM                 |
 | `./vm.sh install-lancedb` | Install LanceDB + opencode-indexing plugin in a running VM               |
 | `./vm.sh status`        | Show VM state, IP, resource usage, port forwards                            |
 | `./vm.sh export`        | Package qcow2 + XML + config + keys into a tarball                          |
@@ -101,6 +103,72 @@ guest with `cloud-init status --long` and
 `tail -f /var/log/cloud-init-output.log`. `./vm.sh ssh` also warns when
 provisioning is still running.
 
+## Agent State Persistence
+
+OpenCode config, credentials, sessions, and (optionally) agent tooling are kept on
+the host, so `vm.sh destroy` and `vm.sh create` do not lose them. Syncing happens
+automatically:
+
+- `create` restores the host copy after cloud-init provisioning finishes.
+- `start` restores it once SSH is available.
+- `stop` and `destroy` sync from the guest before shutting down or deleting the
+  disk (`destroy` leaves the host copy untouched when the VM is already gone).
+
+The host copy is a directory (default `~/.local/share/ai-korobok/opencode`, mode
+`0700`) containing `guest/` (files mirroring their guest paths) and
+`manifest.json`. OpenCode paths are resolved in the guest with
+`opencode debug paths`, falling back to the standard `~/.config/opencode`,
+`~/.local/share/opencode`, `~/.local/state/opencode`, and `~/.cache/opencode`.
+
+### Profiles
+
+| Profile | Contents |
+| --- | --- |
+| `minimal` | OpenCode config, data, and state. |
+| `agent` (default) | `minimal` plus SSH/Git/gh/npm/pip/cloud credentials, dotfiles and shell history, fish/systemd user config, `~/.local/bin`, MCP state, the LanceDB index, and the user crontab. |
+| `full` | `agent` plus OpenCode, Hugging Face, Ollama, npm, pip, uv, Go module, and Playwright caches. Docker volumes only when `include_docker_volumes` is enabled. |
+
+`include_cache` defaults to `false` for `minimal`/`agent` and to `true` for `full`
+unless explicitly set. `include_docker_volumes` only applies to `full` and exports
+each volume best-effort via the guest's Docker storage.
+
+### Portable backups
+
+```bash
+./vm.sh backup-agent                              # opencode-agent-<vm>-<timestamp>.tar.gz
+./vm.sh backup-agent /safe/place/agent-backup.tar.gz
+./vm.sh restore-agent /safe/place/agent-backup.tar.gz          # refuses non-empty state
+./vm.sh restore-agent /safe/place/agent-backup.tar.gz --force
+```
+
+`backup-agent` syncs from a running VM first, or uses the host copy when the VM is
+gone. The archive contains `manifest.json` (format version, timestamp, source VM,
+OpenCode version, profile, included paths) and the mirrored files. It is written
+with mode `0600`. `restore-agent` validates the manifest, restores the host copy,
+and pushes into a running VM immediately; otherwise the state is applied on the next
+`create`/`start`.
+
+> **Security:** archives include credentials, SSH keys, and session history. Keep
+> them `0600`, never commit or upload them, and prefer encrypted storage. The
+> guest's `authorized_keys` is excluded from sync and restore so an old archive
+> cannot lock you out.
+
+### Configuration
+
+```json
+"opencode_persistence": {
+  "enabled": true,
+  "host_path": "~/.local/share/ai-korobok/opencode",
+  "backup_profile": "agent",
+  "include_cache": false,
+  "include_docker_volumes": false
+}
+```
+
+Set `enabled` to `false` to disable the automatic create/start/stop/destroy syncs
+(explicit `backup-agent`/`restore-agent` still work). `host_path` must be absolute
+or start with `~/`; relative paths are resolved against the project directory.
+
 ## Configuration
 
 Edit `config.json` to customize the VM:
@@ -131,6 +199,13 @@ Edit `config.json` to customize the VM:
     "wait": true,
     "timeout_seconds": 1800
   },
+  "opencode_persistence": {
+    "enabled": true,
+    "host_path": "~/.local/share/ai-korobok/opencode",
+    "backup_profile": "agent",
+    "include_cache": false,
+    "include_docker_volumes": false
+  },
   "gpu_passthrough": false,
   "os_variant": "ubuntu24.04"
 }
@@ -145,6 +220,7 @@ Edit `config.json` to customize the VM:
 - **port_forwards**: List of host→guest port mappings
 - **network**: Networking mode and (optionally) the egress interface; see [Networking](#networking)
 - **provisioning**: `wait` (default `true`) and `timeout_seconds` (default 1800) for the cloud-init wait during `create`
+- **opencode_persistence**: agent state sync settings; see [Agent State Persistence](#agent-state-persistence)
 - **gpu_passthrough**: Set to `true` to pass through a discrete GPU (requires IOMMU)
 
 ## What's Installed in the VM
@@ -282,6 +358,10 @@ Import on another host:
 ./vm.sh import ai-vm-export-YYYYMMDDHHMMSS.tar.gz
 ./vm.sh start
 ```
+
+`export` packages the disk, domain XML, config, and SSH keys only. It does **not**
+include the host agent persistence directory or `backup-agent` archives — copy
+those separately if you need the agent state on the new host.
 
 ## Project Structure
 

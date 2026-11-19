@@ -16,6 +16,7 @@ keys/
 
 # Export tarballs
 *.tar.gz
+opencode-agent-*.tar.gz
 
 # Ansible retry files
 *.retry

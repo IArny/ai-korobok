@@ -54,6 +54,43 @@ load_config() {
     WIFI_INTERFACE=$(jq -r '.network.wifi_interface // empty' "$CONFIG_FILE")
     PROVISIONING_WAIT=$(jq -r 'if (.provisioning | type) == "object" and .provisioning.wait == false then "false" else "true" end' "$CONFIG_FILE")
     PROVISIONING_TIMEOUT=$(jq -r 'if (.provisioning | type) == "object" then (.provisioning.timeout_seconds // 1800) else 1800 end' "$CONFIG_FILE")
+    PERSIST_ENABLED=$(jq -r 'if (.opencode_persistence | type) == "object" and .opencode_persistence.enabled == false then "false" else "true" end' "$CONFIG_FILE")
+    PERSIST_HOST_PATH=$(jq -r 'if (.opencode_persistence | type) == "object" then (.opencode_persistence.host_path // "") else "" end' "$CONFIG_FILE")
+    PERSIST_PROFILE=$(jq -r 'if (.opencode_persistence | type) == "object" then (.opencode_persistence.backup_profile // "agent") else "agent" end' "$CONFIG_FILE")
+    PERSIST_INCLUDE_CACHE_RAW=$(jq -r 'if (.opencode_persistence | type) == "object" then (if .opencode_persistence.include_cache == true then "true" elif .opencode_persistence.include_cache == false then "false" else "null" end) else "null" end' "$CONFIG_FILE")
+    PERSIST_INCLUDE_DOCKER_VOLUMES=$(jq -r 'if (.opencode_persistence | type) == "object" and .opencode_persistence.include_docker_volumes == true then "true" else "false" end' "$CONFIG_FILE")
+
+    case "$PERSIST_HOST_PATH" in
+        "~/"*) PERSIST_HOST_PATH="${HOME}/${PERSIST_HOST_PATH#\~/}" ;;
+        "")    PERSIST_HOST_PATH="${HOME}/.local/share/ai-korobok/opencode" ;;
+        /*)    ;;
+        *)     PERSIST_HOST_PATH="${SCRIPT_DIR}/${PERSIST_HOST_PATH}" ;;
+    esac
+    case "$PERSIST_HOST_PATH" in
+        "$SCRIPT_DIR"|"$SCRIPT_DIR"/*)
+            log_warn "opencode_persistence.host_path is inside the project; keep it gitignored and never commit its contents."
+            ;;
+    esac
+    case "$PERSIST_PROFILE" in
+        minimal|agent|full) ;;
+        *)
+            log_warn "Invalid opencode_persistence.backup_profile '${PERSIST_PROFILE}' — using 'agent'."
+            PERSIST_PROFILE="agent"
+            ;;
+    esac
+    if [[ "$PERSIST_INCLUDE_CACHE_RAW" == "null" ]]; then
+        if [[ "$PERSIST_PROFILE" == "full" ]]; then
+            PERSIST_INCLUDE_CACHE="true"
+        else
+            PERSIST_INCLUDE_CACHE="false"
+        fi
+    else
+        PERSIST_INCLUDE_CACHE="$PERSIST_INCLUDE_CACHE_RAW"
+    fi
+    if [[ "$PERSIST_PROFILE" != "full" && "$PERSIST_INCLUDE_DOCKER_VOLUMES" == "true" ]]; then
+        log_warn "opencode_persistence.include_docker_volumes only applies to the 'full' profile; ignoring."
+        PERSIST_INCLUDE_DOCKER_VOLUMES="false"
+    fi
     LOCAL_NETWORK=""
     WIFI_NET_PREFIX="192.168.100"
     WIFI_GATEWAY="${WIFI_NET_PREFIX}.1"
@@ -426,8 +463,9 @@ EOF
 }
 
 get_vm_ip() {
+    local attempts="${1:-30}"
     local ip=""
-    for i in $(seq 1 30); do
+    for i in $(seq 1 "$attempts"); do
         ip=$(virsh domifaddr "$VM_NAME" 2>/dev/null | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
         if [[ -n "$ip" ]]; then
             echo "$ip"
@@ -601,6 +639,442 @@ wait_for_provisioning() {
 
         sleep 5
     done
+}
+
+wait_for_guest_ssh() {
+    local ip="$1"
+    local timeout="${2:-120}"
+    local deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        if vm_ssh "$ip" true 2>/dev/null; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# Paths persisted by profile. OpenCode paths are resolved in the guest first;
+# the rest are conventional locations that are filtered by existence there.
+persist_profile_paths() {
+    local profile="$1"
+    local home="$2"
+    local config="$3"
+    local data="$4"
+    local state="$5"
+    local cache="$6"
+    local include_cache="$7"
+
+    local paths=("$config" "$data" "$state")
+    if [[ "$include_cache" == "true" ]]; then
+        paths+=("$cache")
+    fi
+
+    if [[ "$profile" == "agent" || "$profile" == "full" ]]; then
+        paths+=(
+            "$home/.ssh"
+            "$home/.gitconfig"
+            "$home/.config/gh"
+            "$home/.npmrc"
+            "$home/.netrc"
+            "$home/.config/pip"
+            "$home/.pip/pip.conf"
+            "$home/.aws"
+            "$home/.config/gcloud"
+            "$home/.kube"
+            "$home/.docker/config.json"
+            "$home/.bashrc"
+            "$home/.profile"
+            "$home/.bash_history"
+            "$home/.config/fish"
+            "$home/.config/systemd/user"
+            "$home/.local/bin"
+            "$home/.local/state/opencode-indexing"
+            "$home/.config/mcp"
+            "$home/.local/share/mcp"
+            "/var/spool/cron/crontabs/ubuntu"
+        )
+    fi
+
+    if [[ "$profile" == "full" ]]; then
+        paths+=(
+            "$home/.cache/huggingface"
+            "$home/.ollama"
+            "$home/.npm/_cacache"
+            "$home/.cache/pip"
+            "$home/.cache/uv"
+            "$home/go/pkg/mod"
+            "$home/.cache/ms-playwright"
+        )
+    fi
+
+    printf '%s\n' "${paths[@]}" | awk '!seen[$0]++'
+}
+
+# Prints guest home, config, data, state, and cache paths (one per line),
+# asking OpenCode when it is installed and falling back to Linux defaults.
+persist_resolve_guest_paths() {
+    local ip="$1"
+    vm_ssh "$ip" 'bash -s' 2>/dev/null <<'REMOTE'
+home="${HOME:-/home/ubuntu}"
+echo "$home"
+if command -v opencode >/dev/null 2>&1; then
+    p=$(opencode debug paths config 2>/dev/null); echo "${p:-$home/.config/opencode}"
+    p=$(opencode debug paths data 2>/dev/null); echo "${p:-$home/.local/share/opencode}"
+    p=$(opencode debug paths state 2>/dev/null); echo "${p:-$home/.local/state/opencode}"
+    p=$(opencode debug paths cache 2>/dev/null); echo "${p:-$home/.cache/opencode}"
+else
+    echo "$home/.config/opencode"
+    echo "$home/.local/share/opencode"
+    echo "$home/.local/state/opencode"
+    echo "$home/.cache/opencode"
+fi
+REMOTE
+}
+
+persist_guest_filter_existing() {
+    local ip="$1"
+    shift
+    {
+        echo 'paths=('
+        printf '%q\n' "$@"
+        echo ')'
+        cat <<'REMOTE'
+for p in "${paths[@]}"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then
+        printf '%s\n' "$p"
+    fi
+done
+REMOTE
+    } | vm_ssh "$ip" 'bash -s' 2>/dev/null
+}
+
+persist_guest_tar() {
+    local ip="$1"
+    shift
+    {
+        echo 'paths=('
+        printf '%q\n' "$@"
+        echo ')'
+        cat <<'REMOTE'
+existing=()
+for p in "${paths[@]}"; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    existing+=("${p#/}")
+done
+if [ ${#existing[@]} -eq 0 ]; then
+    exit 7
+fi
+sudo tar czf - -C / --exclude=authorized_keys "${existing[@]}"
+REMOTE
+    } | vm_ssh "$ip" 'bash -s'
+}
+
+persist_guest_opencode_version() {
+    local ip="$1"
+    vm_ssh "$ip" 'opencode --version 2>/dev/null | head -n 1' 2>/dev/null || true
+}
+
+persist_write_manifest() {
+    local host_path="$1"
+    local ip="$2"
+    shift 2
+
+    local created version paths_json docker_json
+    created=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    version=$(persist_guest_opencode_version "$ip")
+    [[ -z "$version" ]] && version="unknown"
+
+    paths_json=$(printf '%s\n' "$@" | jq -R -s 'split("\n") | map(select(length > 0))')
+
+    local volumes=()
+    local archive
+    for archive in "$host_path"/docker-volumes/*.tar.gz; do
+        [[ -f "$archive" ]] || continue
+        volumes+=("$(basename "$archive" .tar.gz)")
+    done
+    if [[ ${#volumes[@]} -gt 0 ]]; then
+        docker_json=$(printf '%s\n' "${volumes[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
+    else
+        docker_json='[]'
+    fi
+
+    if ! jq -n \
+        --arg created "$created" \
+        --arg vm "$VM_NAME" \
+        --arg version "$version" \
+        --arg profile "$PERSIST_PROFILE" \
+        --arg cache "$PERSIST_INCLUDE_CACHE" \
+        --argjson paths "$paths_json" \
+        --argjson volumes "$docker_json" \
+        '{
+            format_version: 1,
+            created_at: $created,
+            source_vm: $vm,
+            opencode_version: $version,
+            profile: $profile,
+            include_cache: ($cache == "true"),
+            included_paths: $paths,
+            docker_volumes: $volumes
+        }' > "${host_path}/manifest.json.tmp"; then
+        rm -f "${host_path}/manifest.json.tmp"
+        return 1
+    fi
+    mv "${host_path}/manifest.json.tmp" "${host_path}/manifest.json"
+    chmod 0600 "${host_path}/manifest.json"
+}
+
+persist_sync_docker_volumes() {
+    local ip="$1"
+    local dir="${PERSIST_HOST_PATH}/docker-volumes"
+    local volumes vol
+
+    volumes=$(vm_ssh "$ip" 'docker volume ls -q 2>/dev/null || true' 2>/dev/null || true)
+    rm -rf "$dir"
+    if [[ -z "$volumes" ]]; then
+        return 0
+    fi
+
+    install -d -m 0700 "$dir"
+    while IFS= read -r vol; do
+        [[ "$vol" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || continue
+        if vm_ssh "$ip" "sudo tar czf - -C /var/lib/docker/volumes/${vol}/_data ." > "${dir}/${vol}.tar.gz" 2>/dev/null; then
+            log_info "  Docker volume: ${vol}"
+        else
+            rm -f "${dir}/${vol}.tar.gz"
+            log_warn "  Could not export Docker volume '${vol}'; skipping."
+        fi
+    done <<< "$volumes"
+
+    if [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+        rmdir "$dir" 2>/dev/null || true
+    fi
+}
+
+persist_sync_from_guest() {
+    local ip="$1"
+    local resolved=()
+
+    if ! [[ "$PERSIST_HOST_PATH" == /* ]]; then
+        log_error "opencode_persistence.host_path must be absolute: ${PERSIST_HOST_PATH}"
+        return 1
+    fi
+
+    mapfile -t resolved < <(persist_resolve_guest_paths "$ip")
+    if [[ ${#resolved[@]} -lt 5 ]]; then
+        log_warn "Could not resolve guest OpenCode paths; skipping agent state sync."
+        return 1
+    fi
+
+    local home="${resolved[0]}"
+    local config="${resolved[1]}"
+    local data="${resolved[2]}"
+    local state="${resolved[3]}"
+    local cache="${resolved[4]}"
+
+    local paths=()
+    mapfile -t paths < <(persist_profile_paths "$PERSIST_PROFILE" "$home" "$config" "$data" "$state" "$cache" "$PERSIST_INCLUDE_CACHE")
+
+    local existing=()
+    mapfile -t existing < <(persist_guest_filter_existing "$ip" "${paths[@]}")
+    if [[ ${#existing[@]} -eq 0 ]]; then
+        log_warn "No agent state found in the guest; leaving the existing backup untouched."
+        return 0
+    fi
+
+    install -d -m 0700 "$PERSIST_HOST_PATH"
+    chmod 0700 "$PERSIST_HOST_PATH"
+    local tmp
+    tmp=$(mktemp -d "${PERSIST_HOST_PATH}/.sync.XXXXXX")
+
+    if ! persist_guest_tar "$ip" "${existing[@]}" | tar xzf - -C "$tmp" --no-same-owner; then
+        rm -rf "$tmp"
+        log_error "Failed to copy agent state from ${VM_NAME}."
+        return 1
+    fi
+
+    rm -rf "${PERSIST_HOST_PATH}/guest.old"
+    if [[ -d "${PERSIST_HOST_PATH}/guest" ]]; then
+        mv "${PERSIST_HOST_PATH}/guest" "${PERSIST_HOST_PATH}/guest.old"
+    fi
+    mv "$tmp" "${PERSIST_HOST_PATH}/guest"
+    rm -rf "${PERSIST_HOST_PATH}/guest.old"
+
+    if [[ "$PERSIST_INCLUDE_DOCKER_VOLUMES" == "true" ]]; then
+        persist_sync_docker_volumes "$ip"
+    else
+        rm -rf "${PERSIST_HOST_PATH}/docker-volumes"
+    fi
+
+    if ! persist_write_manifest "$PERSIST_HOST_PATH" "$ip" "${existing[@]}"; then
+        log_warn "Agent state synced, but writing ${PERSIST_HOST_PATH}/manifest.json failed."
+        return 1
+    fi
+
+    log_info "Synced agent state (${PERSIST_PROFILE}) to ${PERSIST_HOST_PATH}."
+}
+
+persist_push_to_guest() {
+    local ip="$1"
+    local mirror="${PERSIST_HOST_PATH}/guest"
+    local manifest="${PERSIST_HOST_PATH}/manifest.json"
+
+    if [[ ! -f "$manifest" || ! -d "$mirror" ]]; then
+        return 0
+    fi
+
+    if ! tar czf - -C "$mirror" . | vm_ssh "$ip" 'sudo tar xzf - -C / --owner=ubuntu --group=ubuntu --exclude=authorized_keys'; then
+        log_error "Failed to restore agent state into ${VM_NAME}."
+        return 1
+    fi
+
+    local home_paths=()
+    mapfile -t home_paths < <(jq -r '.included_paths[]?' "$manifest" | grep '^/home/' || true)
+    if [[ ${#home_paths[@]} -gt 0 ]]; then
+        {
+            echo 'paths=('
+            printf '%q\n' "${home_paths[@]}"
+            echo ')'
+            cat <<'REMOTE'
+for p in "${paths[@]}"; do
+    [ -e "$p" ] || continue
+    sudo chown -R ubuntu:ubuntu "$p"
+done
+REMOTE
+        } | vm_ssh "$ip" 'bash -s' >/dev/null || log_warn "Could not fix ownership for all restored paths."
+    fi
+
+    local volume
+    for volume in $(jq -r '.docker_volumes[]?' "$manifest"); do
+        [[ "$volume" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || continue
+        local archive="${PERSIST_HOST_PATH}/docker-volumes/${volume}.tar.gz"
+        [[ -f "$archive" ]] || continue
+        if vm_ssh "$ip" "docker volume create ${volume} >/dev/null 2>&1 || true; sudo mkdir -p /var/lib/docker/volumes/${volume}/_data && sudo tar xzf - -C /var/lib/docker/volumes/${volume}/_data" < "$archive"; then
+            log_info "  Restored Docker volume: ${volume}"
+        else
+            log_warn "  Could not restore Docker volume '${volume}'."
+        fi
+    done
+
+    log_info "Restored agent state into ${VM_NAME}."
+}
+
+persist_create_archive() {
+    local archive="$1"
+    local manifest="${PERSIST_HOST_PATH}/manifest.json"
+    local mirror="${PERSIST_HOST_PATH}/guest"
+
+    if [[ ! -f "$manifest" || ! -d "$mirror" ]]; then
+        log_error "No agent state to archive at ${PERSIST_HOST_PATH}."
+        return 1
+    fi
+
+    local staging
+    staging=$(mktemp -d)
+    cp "$manifest" "${staging}/manifest.json"
+    cp -R "$mirror" "${staging}/guest"
+    local members=(manifest.json guest)
+    if [[ -d "${PERSIST_HOST_PATH}/docker-volumes" ]]; then
+        cp -R "${PERSIST_HOST_PATH}/docker-volumes" "${staging}/docker-volumes"
+        members+=(docker-volumes)
+    fi
+
+    if ! ( umask 077; tar czf "$archive" -C "$staging" "${members[@]}" ); then
+        rm -rf "$staging"
+        log_error "Failed to write archive: ${archive}"
+        return 1
+    fi
+    chmod 0600 "$archive"
+    rm -rf "$staging"
+}
+
+persist_install_archive() {
+    local archive="$1"
+    local force="$2"
+    local tmp
+
+    if [[ ! -f "$archive" ]]; then
+        log_error "Archive not found: ${archive}"
+        return 1
+    fi
+
+    local unsafe=0 member members
+    if ! members=$(tar tzf "$archive" 2>/dev/null); then
+        log_error "Could not read archive: ${archive}"
+        return 1
+    fi
+    while IFS= read -r member; do
+        case "$member" in
+            /*|../*|*/../*|*/..) unsafe=1 ;;
+        esac
+    done <<< "$members"
+    if (( unsafe )); then
+        log_error "Archive contains unsafe paths; refusing to restore."
+        return 1
+    fi
+
+    tmp=$(mktemp -d)
+    if ! tar xzf "$archive" -C "$tmp" --no-same-owner 2>/dev/null; then
+        rm -rf "$tmp"
+        log_error "Could not read archive: ${archive}"
+        return 1
+    fi
+
+    local manifest="${tmp}/manifest.json"
+    if [[ ! -f "$manifest" ]] || ! jq empty "$manifest" 2>/dev/null; then
+        rm -rf "$tmp"
+        log_error "Archive is missing a valid manifest.json: ${archive}"
+        return 1
+    fi
+
+    local version
+    version=$(jq -r '.format_version // empty' "$manifest")
+    if [[ "$version" != "1" ]]; then
+        rm -rf "$tmp"
+        log_error "Unsupported archive format version '${version:-unknown}' (expected 1)."
+        return 1
+    fi
+
+    if [[ ! -d "${tmp}/guest" ]]; then
+        rm -rf "$tmp"
+        log_error "Archive has no guest/ payload: ${archive}"
+        return 1
+    fi
+
+    local path
+    unsafe=0
+    while IFS= read -r path; do
+        case "$path" in
+            /*) ;;
+            *) unsafe=1 ;;
+        esac
+        [[ "$path" == *".."* ]] && unsafe=1
+    done < <(jq -r '.included_paths[]?' "$manifest")
+    if (( unsafe )); then
+        rm -rf "$tmp"
+        log_error "Archive manifest contains unsafe paths; refusing to restore."
+        return 1
+    fi
+
+    install -d -m 0700 "$PERSIST_HOST_PATH"
+    if [[ "$force" != "true" && -n "$(find "$PERSIST_HOST_PATH" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+        rm -rf "$tmp"
+        log_error "Host persistence is not empty: ${PERSIST_HOST_PATH}"
+        log_error "Re-run with --force to overwrite it."
+        return 1
+    fi
+
+    rm -rf "${PERSIST_HOST_PATH}/guest" "${PERSIST_HOST_PATH}/manifest.json" "${PERSIST_HOST_PATH}/docker-volumes"
+    mv "${tmp}/guest" "${PERSIST_HOST_PATH}/guest"
+    cp "$manifest" "${PERSIST_HOST_PATH}/manifest.json"
+    if [[ -d "${tmp}/docker-volumes" ]]; then
+        mv "${tmp}/docker-volumes" "${PERSIST_HOST_PATH}/docker-volumes"
+    fi
+    chmod 0700 "$PERSIST_HOST_PATH"
+    chmod 0600 "${PERSIST_HOST_PATH}/manifest.json"
+    rm -rf "$tmp"
+
+    log_info "Restored agent state from ${archive} to ${PERSIST_HOST_PATH}."
 }
 
 check_port_available() {
@@ -905,16 +1379,20 @@ cmd_create() {
     else
         log_info "Waiting for guest provisioning to finish (timeout: $(format_elapsed "$PROVISIONING_TIMEOUT"))..."
         local prov_rc=0
+        local provisioning_ok=false
         wait_for_provisioning "$vm_ip" || prov_rc=$?
         case "$prov_rc" in
             0)
+                provisioning_ok=true
                 if [[ -n "${PROVISIONED_IP:-}" && "${PROVISIONED_IP}" != "$vm_ip" ]]; then
                     log_info "VM IP changed after the provisioning reboot (${vm_ip} -> ${PROVISIONED_IP}); re-applying port forwards..."
                     remove_port_forwards
                     apply_port_forwards "$PROVISIONED_IP"
+                    vm_ip="$PROVISIONED_IP"
                 fi
                 ;;
             2)
+                provisioning_ok=true
                 ;;
             3)
                 log_warn "The VM is running, but provisioning did not finish cleanly."
@@ -926,6 +1404,14 @@ cmd_create() {
                 log_warn "Guest log: /var/log/cloud-init-output.log"
                 ;;
         esac
+
+        if [[ "$PERSIST_ENABLED" == "true" && -f "${PERSIST_HOST_PATH}/manifest.json" ]]; then
+            if [[ "$provisioning_ok" == "true" ]]; then
+                persist_push_to_guest "$vm_ip" || log_warn "Agent state restore failed; retry with './vm.sh restore-agent <archive>'."
+            else
+                log_info "Agent state restore deferred until provisioning completes; it will apply on the next 'vm.sh start'."
+            fi
+        fi
     fi
 
     echo ""
@@ -964,6 +1450,14 @@ cmd_start() {
     else
         log_warn "Could not determine VM IP."
     fi
+
+    if [[ "$PERSIST_ENABLED" == "true" && -n "$vm_ip" && -f "${PERSIST_HOST_PATH}/manifest.json" ]]; then
+        if wait_for_guest_ssh "$vm_ip" 120; then
+            persist_push_to_guest "$vm_ip" || log_warn "Could not restore agent state."
+        else
+            log_warn "SSH is not ready; agent state restore skipped (it will apply on the next start)."
+        fi
+    fi
 }
 
 cmd_stop() {
@@ -977,6 +1471,17 @@ cmd_stop() {
     fi
 
     log_info "Shutting down VM '${VM_NAME}'..."
+
+    if [[ "$PERSIST_ENABLED" == "true" ]]; then
+        local vm_ip=""
+        vm_ip=$(get_vm_ip 1 2>/dev/null || true)
+        if [[ -n "$vm_ip" ]] && wait_for_guest_ssh "$vm_ip" 30; then
+            persist_sync_from_guest "$vm_ip" || log_warn "Could not sync agent state before shutdown."
+        else
+            log_warn "Guest is not reachable; skipping agent state sync."
+        fi
+    fi
+
     virsh shutdown "$VM_NAME"
 
     local timeout=60
@@ -1003,6 +1508,20 @@ cmd_stop() {
 
 cmd_destroy() {
     load_config
+
+    if [[ "$PERSIST_ENABLED" == "true" ]]; then
+        local vm_state
+        vm_state=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "undefined")
+        if [[ "$vm_state" == "running" ]]; then
+            local vm_ip=""
+            vm_ip=$(get_vm_ip 1 2>/dev/null || true)
+            if [[ -n "$vm_ip" ]] && wait_for_guest_ssh "$vm_ip" 30; then
+                persist_sync_from_guest "$vm_ip" || log_warn "Could not sync agent state before destroy; the existing host backup is unchanged."
+            else
+                log_warn "Guest is not reachable; skipping agent state sync."
+            fi
+        fi
+    fi
 
     log_info "Destroying VM '${VM_NAME}'..."
     virsh destroy "$VM_NAME" 2>/dev/null || true
@@ -1062,6 +1581,80 @@ cmd_ssh() {
         log_info "IP not found via DHCP leases, trying localhost:2222..."
         exec ssh -i "$SSH_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@localhost "$@"
     fi
+}
+
+cmd_backup_agent() {
+    load_config
+
+    local archive="${1:-}"
+    if [[ -z "$archive" ]]; then
+        archive="opencode-agent-${VM_NAME}-$(date +%Y%m%d%H%M%S).tar.gz"
+    fi
+
+    local state
+    state=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "undefined")
+    if [[ "$state" == "running" ]]; then
+        local vm_ip
+        vm_ip=$(get_vm_ip 2>/dev/null) || true
+        if [[ -z "$vm_ip" ]]; then
+            log_error "VM '${VM_NAME}' is running but has no IP; cannot sync agent state."
+            exit 1
+        fi
+        if ! wait_for_guest_ssh "$vm_ip" 30; then
+            log_error "VM '${VM_NAME}' is running but SSH is not reachable; cannot sync agent state."
+            exit 1
+        fi
+        log_info "Syncing agent state from ${VM_NAME}..."
+        if ! persist_sync_from_guest "$vm_ip"; then
+            log_error "Backup cancelled: could not sync agent state from the VM."
+            exit 1
+        fi
+    elif [[ -f "${PERSIST_HOST_PATH}/manifest.json" ]]; then
+        log_info "VM '${VM_NAME}' is not running; using ${PERSIST_HOST_PATH}."
+    else
+        log_error "VM '${VM_NAME}' is not running and no host persistence exists at ${PERSIST_HOST_PATH}."
+        exit 1
+    fi
+
+    persist_create_archive "$archive" || exit 1
+    log_info "Agent backup: ${archive} ($(du -h "$archive" | cut -f1))"
+    log_warn "This archive contains credentials and session data. Keep it mode 0600 and do not commit or upload it."
+}
+
+cmd_restore_agent() {
+    local archive=""
+    local force="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force="true"; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *) archive="$1"; shift ;;
+        esac
+    done
+
+    if [[ -z "$archive" ]]; then
+        log_error "Usage: vm.sh restore-agent <archive.tar.gz> [--force]"
+        exit 1
+    fi
+
+    load_config
+    persist_install_archive "$archive" "$force" || exit 1
+
+    local state
+    state=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "undefined")
+    if [[ "$state" == "running" ]]; then
+        local vm_ip=""
+        vm_ip=$(get_vm_ip 2>/dev/null || true)
+        if [[ -n "$vm_ip" ]] && wait_for_guest_ssh "$vm_ip" 60; then
+            persist_push_to_guest "$vm_ip" || exit 1
+        else
+            log_warn "VM is running but SSH is not ready; state will be pushed on the next start."
+        fi
+    else
+        log_info "VM is not running; the restored state will be applied on the next 'vm.sh create' or 'vm.sh start'."
+    fi
+
+    log_info "Restore complete."
 }
 
 cmd_install_lancedb() {
@@ -1316,6 +1909,9 @@ usage() {
     echo "  stop        Graceful ACPI shutdown"
     echo "  destroy     Force stop, undefine, and delete disk images"
     echo "  ssh         SSH into the VM"
+    echo "  backup-agent [archive]   Sync guest agent state and write a portable archive"
+    echo "  restore-agent <archive> [--force]"
+    echo "              Restore agent state into the host persistence directory and the VM"
     echo "  install-lancedb  Install LanceDB + opencode-indexing plugin in the VM"
     echo "  status      Show VM state, IP, resource usage"
     echo "  export      Package VM into a portable tarball"
@@ -1334,6 +1930,8 @@ main() {
         stop)       cmd_stop ;;
         destroy)    cmd_destroy ;;
         ssh)        cmd_ssh "$@" ;;
+        backup-agent) cmd_backup_agent "$@" ;;
+        restore-agent) cmd_restore_agent "$@" ;;
         install-lancedb) cmd_install_lancedb ;;
         status)     cmd_status ;;
         export)     cmd_export ;;

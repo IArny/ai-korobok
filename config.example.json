@@ -24,6 +24,13 @@
     "wait": true,
     "timeout_seconds": 1800
   },
+  "opencode_persistence": {
+    "enabled": true,
+    "host_path": "~/.local/share/ai-korobok/opencode",
+    "backup_profile": "agent",
+    "include_cache": false,
+    "include_docker_volumes": false
+  },
   "gpu_passthrough": false,
   "os_variant": "ubuntu24.04"
 }
