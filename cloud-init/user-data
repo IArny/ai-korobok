@@ -22,6 +22,13 @@ __BACKLOG_SKILL_CONTENT__
 package_update: true
 package_upgrade: true
 
+# vm.sh substitutes a local apt cache here when one is reachable.
+apt:
+  conf: |
+    __APT_PROXY_CONF__
+    Acquire::https::Proxy "DIRECT";
+# __APT_MIRRORS_BLOCK__
+
 packages:
   - python3
   - python3-pip
@@ -40,6 +47,18 @@ packages:
   - build-essential
   - linux-modules-extra-generic
   - wireless-regdb
+  - qemu-system-x86
+  - qemu-utils
+  - libvirt-daemon-system
+  - libvirt-clients
+  - dnsmasq-base
+  - cloud-image-utils
+  - genisoimage
+  - ovmf
+  - jq
+  - iptables
+  - cpu-checker
+  - apt-cacher-ng
 
 runcmd:
   - |
@@ -62,13 +81,29 @@ runcmd:
     echo ">>> Installing LanceDB..."
     pip3 install --break-system-packages --ignore-installed lancedb pyarrow
   - |
-    echo ">>> Setting up shared directory..."
-    mkdir -p __MOUNT_POINT__
-    echo "__MOUNT_TAG__ __MOUNT_POINT__ virtiofs defaults 0 0" >> /etc/fstab
+    if [ -n "__MOUNT_TAG__" ] && [ -n "__MOUNT_POINT__" ]; then
+      echo ">>> Setting up shared directory..."
+      mkdir -p "__MOUNT_POINT__"
+      echo "__MOUNT_TAG__ __MOUNT_POINT__ virtiofs defaults 0 0" >> /etc/fstab
+    else
+      echo ">>> No shared directory configured; skipping virtiofs mount."
+    fi
   - |
     echo ">>> Enabling Docker..."
     systemctl enable docker
     systemctl start docker
+  - |
+    echo ">>> Enabling nested virtualization for e2e..."
+    systemctl enable --now libvirtd
+    systemctl enable --now apt-cacher-ng
+    GROUPS="libvirt"
+    getent group kvm >/dev/null && GROUPS="${GROUPS},kvm"
+    usermod -aG "$GROUPS" ubuntu
+    virsh net-autostart default >/dev/null 2>&1 || true
+    virsh net-start default >/dev/null 2>&1 || true
+    if ! grep -qE '(^flags|^Features)[^:]*:.*(vmx|svm)' /proc/cpuinfo; then
+      echo ">>> WARNING: hardware virtualization is not exposed; nested VMs will use TCG (slow)."
+    fi
   - |
     echo ">>> Configuring local network route..."
     LOCAL_NET="__LOCAL_NETWORK__"

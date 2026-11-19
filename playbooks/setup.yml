@@ -136,6 +136,60 @@
           To enable: modprobe kvm_intel (or kvm_amd) on bare metal.
       when: not kvm_device.stat.exists
 
+    - name: Detect the hardware virtualization vendor
+      ansible.builtin.shell: |
+        if grep -qE '(^flags|^Features)[^:]*:.*vmx' /proc/cpuinfo; then
+          echo intel
+        elif grep -qE '(^flags|^Features)[^:]*:.*svm' /proc/cpuinfo; then
+          echo amd
+        fi
+      register: virt_vendor
+      changed_when: false
+      failed_when: false
+
+    - name: Persist nested virtualization (Intel)
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/kvm-nested.conf
+        content: "options kvm_intel nested=1\n"
+        mode: "0644"
+      when: (virt_vendor.stdout | trim) == "intel"
+
+    - name: Persist nested virtualization (AMD)
+      ansible.builtin.copy:
+        dest: /etc/modprobe.d/kvm-nested.conf
+        content: "options kvm_amd nested=1\n"
+        mode: "0644"
+      when: (virt_vendor.stdout | trim) == "amd"
+
+    - name: Enable nested virtualization now (best effort)
+      ansible.builtin.shell: |
+        set -u
+        case "{{ virt_vendor.stdout | trim }}" in
+          intel) module=kvm_intel ;;
+          amd)   module=kvm_amd ;;
+          *)     exit 0 ;;
+        esac
+        state=$(cat "/sys/module/${module}/parameters/nested" 2>/dev/null || true)
+        case "$state" in
+          1|Y|y) exit 0 ;;
+        esac
+        # Fails safely when a VM is using the module; the modprobe.d file
+        # applies on the next boot instead.
+        modprobe -r "$module" 2>/dev/null || exit 0
+        modprobe "$module" nested=1
+      args:
+        executable: /bin/bash
+      when: (virt_vendor.stdout | trim) in ["intel", "amd"]
+      changed_when: false
+      failed_when: false
+
+    - name: Warn when hardware virtualization is unavailable
+      ansible.builtin.debug:
+        msg: >-
+          No vmx/svm CPU flags found. Nested VMs inside the guest will use
+          TCG (slow); enable virtualization in the host firmware if needed.
+      when: (virt_vendor.stdout | trim) == ""
+
     - name: Verify qemu installation
       ansible.builtin.command: qemu-system-x86_64 --version
       register: qemu_ver

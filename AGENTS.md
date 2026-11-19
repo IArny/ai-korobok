@@ -21,6 +21,7 @@ and cloud-init templates.
 ├── docs/macos.md          # macOS setup notes (Homebrew path) and limitations
 ├── docs/windows.md        # Windows setup notes (WSL2 path) and limitations
 ├── scripts/install-lancedb.sh  # Guest-side installer for LanceDB + opencode-indexing (run via `vm.sh install-lancedb`)
+├── scripts/install-e2e-deps.sh # Guest-side installer for nested QEMU/libvirt (run via `vm.sh install-e2e-deps`)
 ├── cloud-init/user-data   # Guest packages and provisioning (runs once, first boot)
 ├── cloud-init/meta-data   # Cloud-init meta-data
 ├── templates/domain.xml   # Reference libvirt domain XML (vm.sh generates its own)
@@ -28,6 +29,7 @@ and cloud-init templates.
 ├── config.json            # Local config; gitignored
 ├── keys/                  # Auto-generated SSH keypairs; gitignored
 ├── .state/                # Runtime state: seed ISO, domain XML, pid/socket, image cache; gitignored
+├── cache/                 # Cloud image and apt package cache; gitignored
 ├── .venv/                 # Ansible virtualenv created by setup.sh when needed; gitignored
 ├── .gitignore
 ├── AGENTS.md
@@ -44,6 +46,7 @@ Run/verify manually from this directory:
 - `sudo ./setup.sh` — install host deps (Ansible wrapper)
 - `./vm.sh create|start|stop|destroy|status|list-ports`
 - `./vm.sh ssh`
+- `./vm.sh install-e2e-deps` — add nested QEMU/libvirt to an existing VM
 
 Before committing shell changes, at minimum run `bash -n vm.sh setup.sh` to check syntax.
 
@@ -91,6 +94,12 @@ Do not test lifecycle/destructive changes (`create`, `start`, `stop`, `destroy`,
 - Guest Python packages go in the `pip3 install --break-system-packages` runcmd.
 - Adding to `cloud-init/user-data` only affects newly created VMs; existing VMs must be
   recreated (`vm.sh destroy` + `vm.sh create`) or updated manually.
+- Nested-e2e guest packages must stay in sync in `cloud-init/user-data` **and**
+  `scripts/install-e2e-deps.sh` (for existing VMs).
+- The cloud image lives in `cache_dir` (default `<disk dir>/cache`) and is never
+  removed by `destroy`; keep it outside `.state/`. The guest's `apt-cacher-ng` is
+  enabled automatically and `vm.sh` injects it into new VM cloud-init
+  (`apt_proxy: auto`); apt HTTPS repos bypass it via `Acquire::https::Proxy "DIRECT"`.
 
 ### Templates and secrets
 - `cloud-init/user-data` uses `__PLACEHOLDER__` tokens substituted by `sed` in

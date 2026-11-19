@@ -4,6 +4,9 @@ config.json
 # Runtime state
 .state/
 
+# Cached cloud images and apt packages
+cache/
+
 # SSH keys (auto-generated)
 keys/
 

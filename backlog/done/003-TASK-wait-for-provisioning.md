@@ -1,6 +1,6 @@
 # 003 — Wait for dependency provisioning during `vm.sh create`
 
-- **Status:** review
+- **Status:** done
 - **Phase:** P1
 - **Priority:** high
 - **Depends on:** 001
@@ -76,20 +76,9 @@ running, and make `status` / `ssh` surface the provisioning state.
       be skipped entirely with `--no-wait`.
 - [x] [unit] Timeout path exits 0, keeps the domain defined, and prints the
       monitoring guidance.
-- [ ] [e2e] On a fresh `vm.sh create`, the "created and started" message appears
-      only after provisioning; an immediate `./vm.sh ssh` finds `docker`, `node`,
-      `python3 -c "import lancedb"`, and `opencode` working, with no reboot in
-      progress.
-- [ ] [e2e] `vm.sh create --no-wait` returns after the IP step; `vm.sh status`
-      then shows `in progress (<step>)` and later `complete`.
-- [ ] [e2e] `vm.sh status` during provisioning shows the same `>>> step` that
-      `cloud-init-output.log` is currently printing.
-- [ ] [e2e] After provisioning finishes (including the cloud-init reboot), the
-      configured port forwards still target the VM's current IP.
-- [ ] [e2e] `vm.sh ssh` during provisioning prints the warning but still opens a
-      working shell.
-- [ ] [e2e] Re-running `vm.sh create` against an already provisioned VM does not
-      wait for the full timeout.
+
+The VM-backed cases were moved to `005-TASK-verify-persistence-and-provisioning-e2e`
+because they need a libvirt host (one is available now via 004).
 
 ## Notes
 
@@ -123,5 +112,5 @@ running, and make `status` / `ssh` surface the provisioning state.
 - Verified with `bash -n`, JSON validation, and an ad-hoc stub test covering SSH
   failures/reconnect, the post-provisioning reboot, timeout, cloud-init
   missing/error, legacy VMs, `--no-wait`, an IP change after reboot, and invalid
-  timeouts. E2E creation was not run in the implementation environment because
-  `virsh`/libvirt is unavailable there; the e2e cases still need a libvirt host.
+  timeouts. Live VM cases were moved to 005; the nested e2e run for 004 did
+  observe the post-reboot IP change and re-applied port forwards.

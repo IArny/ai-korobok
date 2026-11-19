@@ -6,7 +6,9 @@ CONFIG_FILE="${SCRIPT_DIR}/config.json"
 STATE_DIR="${SCRIPT_DIR}/.state"
 IPTABLES_STATE="${STATE_DIR}/iptables-rules"
 VIRTIOFS_PID_FILE="${STATE_DIR}/virtiofsd.pid"
-CLOUD_IMAGE_CACHE="${STATE_DIR}/.cloud-image-cache"
+CACHE_DIR="${SCRIPT_DIR}/cache"
+APT_PROXY_CFG=""
+APT_MIRROR_CFG=""
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -18,6 +20,20 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 log_cmd()   { echo -e "${CYAN}[CMD]${NC} $*"; }
+
+# Run a command that needs root: directly when already root, otherwise through
+# non-interactive sudo so plain `./vm.sh ...` works for sudo-capable users.
+priv() {
+    if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+        "$@"
+    elif sudo -n true 2>/dev/null; then
+        sudo -n "$@"
+    else
+        log_error "This step needs root privileges: $*"
+        log_error "Re-run the command with sudo (e.g. sudo ./vm.sh create)."
+        return 1
+    fi
+}
 
 ensure_state_dir() {
     mkdir -p "$STATE_DIR"
@@ -100,7 +116,25 @@ load_config() {
     DISK_DIR="$(dirname "$DISK_PATH")"
     SEED_ISO="${DISK_DIR}/${VM_NAME}-seed.iso"
     OVERLAY_PATH="${DISK_PATH}"
-    BASE_IMAGE="${DISK_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
+
+    # Cached cloud image and apt packages survive destroy; they are shared by
+    # every VM created from this project.
+    local cache_cfg
+    cache_cfg=$(jq -r '.cache_dir // ""' "$CONFIG_FILE")
+    if [[ -z "$cache_cfg" ]]; then
+        # Default to a sibling of the disk so qemu can always read it.
+        CACHE_DIR="${DISK_DIR}/cache"
+    elif [[ "$cache_cfg" == "~/"* ]]; then
+        CACHE_DIR="${HOME}/${cache_cfg#\~/}"
+    elif [[ "$cache_cfg" == /* ]]; then
+        CACHE_DIR="$cache_cfg"
+    else
+        CACHE_DIR="${SCRIPT_DIR}/${cache_cfg}"
+    fi
+    BASE_IMAGE="${CACHE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
+    APT_PROXY_CFG=$(jq -r '.apt_proxy // ""' "$CONFIG_FILE")
+    APT_MIRROR_CFG=$(jq -r '.apt_mirror // ""' "$CONFIG_FILE")
+
     DOMAIN_XML="${STATE_DIR}/${VM_NAME}.xml"
 }
 
@@ -113,7 +147,8 @@ detect_kvm() {
     else
         KVM_AVAILABLE=false
         DOMAIN_TYPE="qemu"
-        CPU_MODE="max"
+        # libvirt 10+ rejects the old 'max' alias; 'maximum' works with TCG.
+        CPU_MODE="maximum"
         log_warn "/dev/kvm not available — using TCG (software emulation). VM will be slower."
     fi
 }
@@ -198,6 +233,34 @@ get_public_key() {
     cat "${SSH_KEY}.pub"
 }
 
+# Prints an apt.conf line pointing at a local apt cache, or returns 1 when none
+# is configured/reachable. Nested VMs reuse the guest's apt-cacher-ng so repeat
+# provisions do not re-download packages.
+resolve_apt_proxy() {
+    local cfg="${APT_PROXY_CFG:-auto}"
+    case "$cfg" in
+        none|off|false|no)
+            return 1
+            ;;
+        auto|"")
+            local gw
+            gw=$(virsh net-dumpxml default 2>/dev/null \
+                | awk -F"'" '/<ip address=/{print $2; exit}')
+            [[ -n "$gw" ]] || gw="192.168.122.1"
+            if timeout 1 bash -c "exec 3<>/dev/tcp/${gw}/3142" 2>/dev/null; then
+                echo "Acquire::http::Proxy \"http://${gw}:3142\";"
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            [[ "$cfg" == *:* ]] || cfg="${cfg}:3142"
+            echo "Acquire::http::Proxy \"http://${cfg}\";"
+            return 0
+            ;;
+    esac
+}
+
 generate_cloud_init() {
     log_info "Generating cloud-init seed ISO..."
     local user_data_template="${SCRIPT_DIR}/cloud-init/user-data"
@@ -216,13 +279,45 @@ generate_cloud_init() {
     local password_hash
     password_hash=$(openssl passwd -6 "$VM_PASSWORD")
 
+    local apt_proxy_conf="# local apt cache disabled"
+    local resolved_proxy
+    if resolved_proxy=$(resolve_apt_proxy); then
+        apt_proxy_conf="$resolved_proxy"
+        log_info "Routing guest apt downloads through the local cache."
+    fi
+
     sed -e "s|__SSH_PUBLIC_KEY__|${pub_key}|g" \
         -e "s|__PASSWORD_HASH__|${password_hash}|g" \
         -e "s|__MOUNT_POINT__|${SHARED_MOUNT_POINT}|g" \
         -e "s|__MOUNT_TAG__|${SHARED_MOUNT_TAG}|g" \
         -e "s|__LOCAL_NETWORK__|${LOCAL_NETWORK}|g" \
         -e "s|__WIFI_GATEWAY__|${WIFI_GATEWAY}|g" \
+        -e "s|__APT_PROXY_CONF__|${apt_proxy_conf}|g" \
         "$user_data_template" > "$user_data_out"
+
+    local mirrors_block="# (using the image's default apt mirrors)"
+    if [[ -n "$APT_MIRROR_CFG" ]]; then
+        mirrors_block="  primary:
+    - arches: [default]
+      uri: \"${APT_MIRROR_CFG}\"
+  security:
+    - arches: [default]
+      uri: \"${APT_MIRROR_CFG}\""
+        log_info "Using apt mirror ${APT_MIRROR_CFG} for the guest."
+    fi
+    local mirror_block_file="${STATE_DIR}/apt-mirrors.block"
+    local mirror_tmp="${STATE_DIR}/user-data.mirrors"
+    printf '%s\n' "$mirrors_block" > "$mirror_block_file"
+    awk -v block="$mirror_block_file" '
+        /__APT_MIRRORS_BLOCK__/ {
+            while ((getline line < block) > 0) print line
+            close(block)
+            next
+        }
+        { print }
+    ' "$user_data_out" > "$mirror_tmp"
+    mv "$mirror_tmp" "$user_data_out"
+    rm -f "$mirror_block_file"
 
     local skill_src="${SCRIPT_DIR}/skills/backlog/SKILL.md"
     if [[ ! -f "$skill_src" ]]; then
@@ -269,22 +364,28 @@ generate_cloud_init() {
 }
 
 download_cloud_image() {
-    if [[ ! -d "$DISK_DIR" ]]; then
-        if ! mkdir -p "$DISK_DIR" 2>/dev/null; then
-            sudo mkdir -p "$DISK_DIR"
+    if [[ ! -d "$CACHE_DIR" ]]; then
+        if ! mkdir -p "$CACHE_DIR" 2>/dev/null; then
+            sudo mkdir -p "$CACHE_DIR"
         fi
     fi
 
+    # Migrate images left by older layouts (next to the disk, or in .state).
     LEGACY_IMAGE_MOVED=false
-    local legacy_image="${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"
-    if [[ ! -f "$BASE_IMAGE" ]] && [[ -f "$legacy_image" ]]; then
-        log_info "Moving cached cloud image to libvirt storage: ${BASE_IMAGE}"
-        if [[ -w "$DISK_DIR" ]]; then
-            mv "$legacy_image" "$BASE_IMAGE"
-        else
-            sudo mv "$legacy_image" "$BASE_IMAGE"
-        fi
-        LEGACY_IMAGE_MOVED=true
+    if [[ ! -f "$BASE_IMAGE" ]]; then
+        local old
+        for old in "${DISK_DIR}/ubuntu-24.04-server-cloudimg-amd64.img" \
+                   "${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img"; do
+            [[ -f "$old" ]] || continue
+            log_info "Moving cloud image into cache: ${BASE_IMAGE}"
+            if [[ -w "$CACHE_DIR" ]]; then
+                mv "$old" "$BASE_IMAGE" 2>/dev/null || sudo mv "$old" "$BASE_IMAGE"
+            else
+                sudo mv "$old" "$BASE_IMAGE"
+            fi
+            LEGACY_IMAGE_MOVED=true
+            break
+        done
     fi
 
     if [[ -f "$BASE_IMAGE" ]]; then
@@ -293,8 +394,9 @@ download_cloud_image() {
         local url="https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
         log_info "Downloading Ubuntu 24.04 cloud image..."
         log_info "URL: ${url}"
-        if [[ -w "$DISK_DIR" ]]; then
-            wget -q --show-progress -O "$BASE_IMAGE" "$url"
+        if [[ -w "$CACHE_DIR" ]]; then
+            wget -q --show-progress -O "${BASE_IMAGE}.download" "$url"
+            mv "${BASE_IMAGE}.download" "$BASE_IMAGE"
         else
             local tmp="${STATE_DIR}/ubuntu-24.04-server-cloudimg-amd64.img.download"
             wget -q --show-progress -O "$tmp" "$url"
@@ -463,7 +565,7 @@ EOF
 }
 
 get_vm_ip() {
-    local attempts="${1:-30}"
+    local attempts="${1:-90}"
     local ip=""
     for i in $(seq 1 "$attempts"); do
         ip=$(virsh domifaddr "$VM_NAME" 2>/dev/null | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1 || true)
@@ -1087,29 +1189,23 @@ check_port_available() {
 
 ensure_forwarding() {
     local policy
-    policy=$(iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD/ {print $3}' || true)
+    policy=$(priv iptables -S FORWARD 2>/dev/null | awk '/^-P FORWARD/ {print $3}' || true)
     if [[ "$policy" != "ACCEPT" ]]; then
         log_warn "Host FORWARD policy is '${policy:-unknown}' — setting to ACCEPT so VM traffic can be routed."
-        iptables -P FORWARD ACCEPT
+        priv iptables -P FORWARD ACCEPT
     fi
     persist_forwarding
 }
 
 persist_forwarding() {
-    if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-        log_warn "Not running as root — FORWARD policy will not persist across reboots."
-        log_warn "Re-run with sudo, e.g. sudo ./vm.sh create"
-        return
-    fi
-
     if command -v netfilter-persistent &>/dev/null; then
-        if netfilter-persistent save &>/dev/null; then
+        if priv netfilter-persistent save &>/dev/null; then
             log_info "Saved iptables rules via netfilter-persistent."
         else
             log_warn "Could not save iptables rules via netfilter-persistent."
         fi
     elif [[ -d /etc/sysconfig ]] && command -v iptables-save &>/dev/null; then
-        if iptables-save > /etc/sysconfig/iptables; then
+        if priv sh -c 'iptables-save > /etc/sysconfig/iptables' 2>/dev/null; then
             log_info "Saved iptables rules to /etc/sysconfig/iptables."
         else
             log_warn "Could not save iptables rules to /etc/sysconfig/iptables."
@@ -1143,14 +1239,14 @@ apply_port_forwards() {
         fi
 
         local rule="-p ${proto} --dport ${host_port} -j DNAT --to-destination ${vm_ip}:${guest_port}"
-        if ! iptables -t nat -C PREROUTING $rule 2>/dev/null; then
-            iptables -t nat -A PREROUTING $rule
+        if ! priv iptables -t nat -C PREROUTING $rule 2>/dev/null; then
+            priv iptables -t nat -A PREROUTING $rule
         fi
         echo "nat:PREROUTING:${rule}" >> "$IPTABLES_STATE"
 
         local rule2="-d ${vm_ip}/32 -p ${proto} --dport ${guest_port} -j ACCEPT"
-        if ! iptables -C FORWARD $rule2 2>/dev/null; then
-            iptables -A FORWARD $rule2
+        if ! priv iptables -C FORWARD $rule2 2>/dev/null; then
+            priv iptables -A FORWARD $rule2
         fi
         echo "filter:FORWARD:${rule2}" >> "$IPTABLES_STATE"
 
@@ -1168,7 +1264,7 @@ remove_port_forwards() {
         table=$(echo "$line" | cut -d: -f1)
         chain=$(echo "$line" | cut -d: -f2)
         rule=$(echo "$line" | cut -d: -f3-)
-        iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
+        priv iptables -t "$table" -D "$chain" $rule 2>/dev/null || true
     done < "$IPTABLES_STATE"
     rm -f "$IPTABLES_STATE"
 }
@@ -1416,7 +1512,9 @@ cmd_create() {
 
     echo ""
     log_info "VM '${VM_NAME}' created and started."
-    log_info "SSH: ssh -i ${SSH_KEY} ubuntu@localhost -p 2222"
+    local ssh_host_port
+    ssh_host_port=$(jq -r '[.port_forwards[]? | select(.guest == 22) | .host] | first // empty' "$CONFIG_FILE")
+    log_info "SSH: ssh -i ${SSH_KEY} ubuntu@localhost -p ${ssh_host_port:-22}"
     log_info "     (or use: ./vm.sh ssh)"
 }
 
@@ -1532,7 +1630,7 @@ cmd_destroy() {
     undefine_wifi_network
 
     if [[ -f "$DISK_PATH" ]]; then
-        rm -f "$DISK_PATH"
+        rm -f "$DISK_PATH" 2>/dev/null || sudo rm -f "$DISK_PATH"
         log_info "Removed disk: ${DISK_PATH}"
     fi
 
@@ -1541,7 +1639,7 @@ cmd_destroy() {
         log_info "Removed seed ISO: ${SEED_ISO}"
     fi
 
-    rm -rf "$STATE_DIR"
+    rm -rf "$STATE_DIR" 2>/dev/null || sudo rm -rf "$STATE_DIR"
     log_info "VM '${VM_NAME}' destroyed and cleaned up."
 }
 
@@ -1692,6 +1790,44 @@ cmd_install_lancedb() {
     fi
 
     log_info "LanceDB + opencode-indexing installed in ${VM_NAME}."
+}
+
+cmd_install_e2e_deps() {
+    load_config
+
+    if [[ ! -f "$SSH_KEY" ]]; then
+        log_error "SSH key not found: ${SSH_KEY}"
+        log_error "Run 'vm.sh create' first."
+        exit 1
+    fi
+
+    local state
+    state=$(virsh domstate "$VM_NAME" 2>/dev/null || echo "undefined")
+    if [[ "$state" != "running" ]]; then
+        log_error "VM '${VM_NAME}' is not running (state: ${state})."
+        log_error "Run 'vm.sh start' first."
+        exit 1
+    fi
+
+    local installer="${SCRIPT_DIR}/scripts/install-e2e-deps.sh"
+    if [[ ! -f "$installer" ]]; then
+        log_error "Installer script not found: ${installer}"
+        exit 1
+    fi
+
+    local vm_ip
+    vm_ip=$(get_vm_ip 2>/dev/null) || true
+
+    log_info "Installing nested QEMU/libvirt dependencies in ${VM_NAME}..."
+    if [[ -n "$vm_ip" ]]; then
+        ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@${vm_ip}" 'bash -s' < "$installer"
+    else
+        log_warn "IP not found via DHCP leases, trying localhost:2222..."
+        ssh -i "$SSH_KEY" -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@localhost 'bash -s' < "$installer"
+    fi
+
+    log_info "Nested e2e dependencies installed in ${VM_NAME}."
+    log_info "Reconnect with './vm.sh ssh' so the ubuntu user picks up the kvm/libvirt groups."
 }
 
 cmd_status() {
@@ -1913,6 +2049,7 @@ usage() {
     echo "  restore-agent <archive> [--force]"
     echo "              Restore agent state into the host persistence directory and the VM"
     echo "  install-lancedb  Install LanceDB + opencode-indexing plugin in the VM"
+    echo "  install-e2e-deps Install QEMU/libvirt in the VM for nested e2e runs"
     echo "  status      Show VM state, IP, resource usage"
     echo "  export      Package VM into a portable tarball"
     echo "  import <f>  Import a VM from a tarball"
@@ -1933,6 +2070,7 @@ main() {
         backup-agent) cmd_backup_agent "$@" ;;
         restore-agent) cmd_restore_agent "$@" ;;
         install-lancedb) cmd_install_lancedb ;;
+        install-e2e-deps) cmd_install_e2e_deps ;;
         status)     cmd_status ;;
         export)     cmd_export ;;
         import)     cmd_import "${1:-}" ;;

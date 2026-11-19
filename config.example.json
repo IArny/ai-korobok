@@ -5,6 +5,9 @@
   "memory_mb": 8192,
   "disk_gb": 50,
   "disk_path": "/var/lib/libvirt/images/ai-vm.qcow2",
+  "cache_dir": "/var/lib/libvirt/images/cache",
+  "apt_proxy": "auto",
+  "apt_mirror": "",
   "shared_dir": {
     "host_path": "/home/dev/ai-workspace",
     "mount_tag": "ai-workspace",

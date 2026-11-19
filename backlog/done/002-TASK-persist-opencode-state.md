@@ -1,6 +1,6 @@
 # 002 — Persist and back up OpenCode agent state
 
-- **Status:** review
+- **Status:** done
 - **Phase:** P1
 - **Priority:** high
 - **Depends on:** 001
@@ -83,32 +83,16 @@ another host.
 - [x] [unit] `bash -n vm.sh setup.sh scripts/*.sh` reports no syntax errors.
 - [x] [unit] A helper test with temporary source/destination directories preserves
       file contents, relative paths, and configured ownership mapping without a VM.
-- [ ] [e2e] Create a VM, write a marker OpenCode config and a session/DB marker,
-      run `vm.sh destroy`, recreate, and verify both markers are restored.
-- [ ] [e2e] First `vm.sh create` with an empty host persistence directory succeeds
-      without errors.
-- [ ] [e2e] `vm.sh destroy` when the VM is already stopped/undefined leaves the host
-      backup intact.
-- [ ] [e2e] Restored OpenCode files are owned by `ubuntu:ubuntu` and are readable by
-      the `ubuntu` user after recreation.
-- [ ] [e2e] With `include_cache: false`, `~/.cache/opencode` is not copied; with
-      `true`, it is restored.
 - [x] [unit] Profile selection with temporary home directories: `minimal`
       includes only OpenCode paths, `agent` adds credentials/runtime state, and
       `full` adds caches/models; the default profile resolves to `agent`.
-- [ ] [e2e] `vm.sh backup-agent` with no profile configured uses `agent` and
-      includes credentials while excluding caches.
 - [x] [unit] Backup/restore helpers with temporary directories: the archive
       contains the manifest and expected paths, restore round-trips the data,
       `--force` governs overwriting, and a corrupt/missing manifest is rejected
       without touching existing persistence.
-- [ ] [e2e] Run `vm.sh backup-agent` on a running VM, destroy the VM, restore the
-      archive under a different host persistence path (simulating a new host),
-      recreate the VM, and verify the config/session markers are present.
-- [ ] [e2e] `vm.sh restore-agent` while the VM is running applies the restored data
-      immediately.
-- [ ] [e2e] The backup archive is mode `0600` and excludes `~/.cache/opencode` by
-      default.
+
+The VM-backed cases were moved to `005-TASK-verify-persistence-and-provisioning-e2e`
+because they need a libvirt host (one is available now via 004).
 
 ## Notes
 
@@ -176,8 +160,8 @@ another host.
   (not committed): 47 assertions covering profile selection, config defaults
   and overrides, archive round-trips, `--force`, corrupt/unsafe manifests,
   tar-member traversal, guest sync, and push.
-- E2E cases remain unchecked: this environment has no `virsh`/libvirt, so no VM
-  could be created.
+- E2E cases were moved to 005: no libvirt host was available during
+  implementation; nested e2e support (004) now provides one.
 
 - The real CLI path was exercised in a throwaway project copy: `backup-agent` wrote a
   mode-`0600` archive from the host copy with no VM, `restore-agent` refused a

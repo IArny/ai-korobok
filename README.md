@@ -62,6 +62,7 @@ details, and limitations.
 | `./vm.sh backup-agent [archive]` | Sync agent state from the VM and write a portable archive          |
 | `./vm.sh restore-agent <archive> [--force]` | Restore agent state into the host and VM                 |
 | `./vm.sh install-lancedb` | Install LanceDB + opencode-indexing plugin in a running VM               |
+| `./vm.sh install-e2e-deps` | Install QEMU/libvirt in a running VM for nested e2e runs                 |
 | `./vm.sh status`        | Show VM state, IP, resource usage, port forwards                            |
 | `./vm.sh export`        | Package qcow2 + XML + config + keys into a tarball                          |
 | `./vm.sh import <file>` | Unpack tarball, define domain, ready to start                               |
@@ -76,6 +77,55 @@ if needed, and runs the plugin installer as the `ubuntu` user so it writes
 `~/.config/opencode/indexing.json` and registers with `opencode plugin add`.
 Newly created VMs already get both via cloud-init; use this command to
 add them to an existing VM. It is idempotent — safe to re-run.
+
+### Running e2e inside the VM
+
+The guest also contains QEMU/libvirt, so destructive VM lifecycle checks can run
+inside `ai-vm` against a nested VM instead of on the host. Fresh VMs get the
+dependencies from cloud-init; for an existing VM run:
+
+```bash
+./vm.sh install-e2e-deps
+./vm.sh ssh    # reconnect so ubuntu picks up the kvm/libvirt groups
+```
+
+Inside the guest, copy the project to guest-local storage (not the virtiofs
+mount) and use a small, non-conflicting config. Keep `disk_path` under
+`/var/lib/libvirt/images/`: libvirt runs QEMU as `libvirt-qemu`, which cannot
+traverse a `750` home directory, and that directory is root-owned, so `vm.sh`
+creates the overlay through `sudo`. The cloud image is cached in
+`/var/lib/libvirt/images/cache` by default.
+
+```bash
+mkdir -p /tmp/ai-korobok-e2e
+tar -C /mnt/workspace/emulator \
+  --exclude=./.state --exclude=./.venv --exclude=./keys --exclude=./config.json \
+  -cf - . | tar -C /tmp/ai-korobok-e2e -xf -
+cd /tmp/ai-korobok-e2e
+jq 'del(.shared_dir)
+    | .vm_name="ai-vm-e2e"
+    | .disk_path="/var/lib/libvirt/images/ai-vm-e2e.qcow2"
+    | .vcpus=2
+    | .memory_mb=2048
+    | .disk_gb=16
+    | .port_forwards=[{"host":2223,"guest":22,"protocol":"tcp"}]
+    | .opencode_persistence.enabled=false' config.example.json > config.json
+./vm.sh create
+./vm.sh ssh
+./vm.sh destroy
+```
+
+Nested boot is slower than bare metal; `create` gives the guest up to three
+minutes to obtain a DHCP lease before giving up on the IP (and then skips the
+provisioning wait). The iptables rules for port forwarding are applied through
+`sudo -n`, so run `vm.sh` as a normal user with `sudo` access, not as root.
+
+`/dev/kvm` must be present and writable. If the host does not expose nested
+virtualization, the nested VM falls back to TCG (much slower). `setup.sh` writes
+the `kvm_intel.nested=1` / `kvm_amd.nested=1` module option best-effort; a reboot
+is required if a VM is already using the module. If the current SSH session
+predates the group change, reconnect or run nested commands with
+`sg kvm -c './vm.sh create'`.
 
 ### Provisioning wait
 
@@ -223,6 +273,27 @@ Edit `config.json` to customize the VM:
 - **opencode_persistence**: agent state sync settings; see [Agent State Persistence](#agent-state-persistence)
 - **gpu_passthrough**: Set to `true` to pass through a discrete GPU (requires IOMMU)
 
+## Caching
+
+`./vm.sh create` keeps the Ubuntu cloud image in `cache_dir`; `./vm.sh destroy`
+leaves it in place, so recreating a VM does not download the image again. The
+default is `<disk dir>/cache` (for example `/var/lib/libvirt/images/cache`). Set
+`cache_dir` in `config.json` to override it; `~` and relative paths are resolved.
+The QEMU user must be able to read the cache, so a libvirt storage directory is
+the safest location; a project directory under a `750` home is not.
+
+For nested e2e runs the guest runs `apt-cacher-ng`, and `vm.sh` points new VMs at
+it automatically: it reads the default network gateway and probes port 3142.
+Override with `apt_proxy` in `config.json` (a `host:port` string), or disable it
+with `"apt_proxy": "none"`. Ubuntu archive packages are then served from the
+guest's cache instead of being downloaded for every nested VM. HTTPS repos
+(NodeSource, Docker) skip the cache via `Acquire::https::Proxy "DIRECT"`, since
+apt-cacher-ng does not tunnel `CONNECT` and they are not cached anyway.
+
+`apt_mirror` (empty by default) points new VMs at a different Ubuntu archive, for
+example a regional mirror or one reachable when `archive.ubuntu.com` is not. It
+is used for both the primary and security suites.
+
 ## What's Installed in the VM
 
 The cloud-init provisioning automatically installs:
@@ -234,6 +305,7 @@ The cloud-init provisioning automatically installs:
 - Common AI packages: `openai`, `anthropic`, `httpx`, `uvicorn`, `fastapi`, `pydantic`
 - LanceDB: `lancedb` + `pyarrow` (Python) and the `@javierkaiser/opencode-indexing`
   OpenCode plugin (embedded LanceDB semantic index, installed for the `ubuntu` user)
+- QEMU/libvirt, OVMF, and `cloud-image-utils` for running nested e2e VMs
 - Git, curl, htop, ripgrep, build-essential
 
 ## Shared Directory
