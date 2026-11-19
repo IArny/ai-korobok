@@ -435,6 +435,11 @@ Import on another host:
 include the host agent persistence directory or `backup-agent` archives — copy
 those separately if you need the agent state on the new host.
 
+## Changelog
+
+Release notes live in [changelog/](changelog/); see
+[0.1.0](changelog/0.1.0.md) for the current version.
+
 ## Project Structure
 
 ```
@@ -455,5 +460,6 @@ ai-vm-manager/
 │   ├── *-seed.iso       # Cloud-init seed ISO
 │   ├── iptables-rules   # Tracked port forwarding rules
 │   └── virtiofsd.pid    # virtiofs daemon PID
+├── changelog/           # Release notes (one file per version)
 └── README.md
 ```
