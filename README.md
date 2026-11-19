@@ -54,7 +54,7 @@ details, and limitations.
 
 | Command                 | Description                                                                 |
 | ----------------------- | --------------------------------------------------------------------------- |
-| `./vm.sh create`        | Download cloud image, generate cloud-init, create disk, define and start VM |
+| `./vm.sh create`        | Download cloud image, generate cloud-init, create disk, define and start VM, then wait for provisioning |
 | `./vm.sh start`         | Start an existing stopped VM                                                |
 | `./vm.sh stop`          | Graceful ACPI shutdown (60s timeout, then force)                            |
 | `./vm.sh destroy`       | Force stop + undefine + delete disk images + cleanup                        |
@@ -74,6 +74,32 @@ if needed, and runs the plugin installer as the `ubuntu` user so it writes
 `~/.config/opencode/indexing.json` and registers with `opencode plugin add`.
 Newly created VMs already get both via cloud-init; use this command to
 add them to an existing VM. It is idempotent — safe to re-run.
+
+### Provisioning wait
+
+`./vm.sh create` waits for cloud-init to finish installing guest dependencies
+(Node.js, Docker, Python packages, LanceDB, OpenCode) before it prints the success
+message. While it waits it prints the current `>>>` step from
+`/var/log/cloud-init-output.log`, so a long package install looks like progress
+rather than a hang.
+
+Cloud-init reboots the VM when provisioning finishes; the wait follows the reboot,
+re-resolves the VM IP, and re-applies port forwards if the address changed. The
+guest writes `/var/lib/ai-korobok/provisioned` as its completion marker, so a
+re-run against an already provisioned VM returns immediately.
+
+```bash
+./vm.sh create              # wait (default)
+./vm.sh create --no-wait    # return once the VM has an IP
+./vm.sh create --timeout 3600
+```
+
+If provisioning takes longer than `provisioning.timeout_seconds` (default 1800),
+`create` leaves the VM running, prints a warning, and exits 0. Check progress with
+`./vm.sh status` (shows `starting`, `in progress (<step>)`, or `complete`) or in the
+guest with `cloud-init status --long` and
+`tail -f /var/log/cloud-init-output.log`. `./vm.sh ssh` also warns when
+provisioning is still running.
 
 ## Configuration
 
@@ -101,6 +127,10 @@ Edit `config.json` to customize the VM:
     "type": "nat",
     "wifi_interface": "wlp0s20f3"
   },
+  "provisioning": {
+    "wait": true,
+    "timeout_seconds": 1800
+  },
   "gpu_passthrough": false,
   "os_variant": "ubuntu24.04"
 }
@@ -114,6 +144,7 @@ Edit `config.json` to customize the VM:
 - **shared_dir**: virtiofs host↔VM shared directory
 - **port_forwards**: List of host→guest port mappings
 - **network**: Networking mode and (optionally) the egress interface; see [Networking](#networking)
+- **provisioning**: `wait` (default `true`) and `timeout_seconds` (default 1800) for the cloud-init wait during `create`
 - **gpu_passthrough**: Set to `true` to pass through a discrete GPU (requires IOMMU)
 
 ## What's Installed in the VM

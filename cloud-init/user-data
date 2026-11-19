@@ -31,6 +31,7 @@ packages:
   - wget
   - htop
   - ripgrep
+  - fish
   - net-tools
   - apt-transport-https
   - ca-certificates
@@ -56,7 +57,7 @@ runcmd:
     usermod -aG docker ubuntu
   - |
     echo ">>> Installing Python AI packages..."
-    pip3 install --break-system-packages openai anthropic httpx uvicorn fastapi pydantic
+    pip3 install --break-system-packages uvicorn
   - |
     echo ">>> Installing LanceDB..."
     pip3 install --break-system-packages --ignore-installed lancedb pyarrow
@@ -101,6 +102,11 @@ runcmd:
     fi
   - |
     echo ">>> Setup complete."
+    install -d -m 0755 /var/lib/ai-korobok
+    printf '%s %s\n' \
+      "$(cat /proc/sys/kernel/random/boot_id)" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > /var/lib/ai-korobok/provisioned
 
 power_state:
   mode: reboot

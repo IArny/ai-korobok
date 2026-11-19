@@ -52,6 +52,8 @@ load_config() {
     SHARED_MOUNT_POINT=$(jq -r '.shared_dir.mount_point // empty' "$CONFIG_FILE")
     NETWORK_TYPE=$(jq -r '.network.type // "nat"' "$CONFIG_FILE")
     WIFI_INTERFACE=$(jq -r '.network.wifi_interface // empty' "$CONFIG_FILE")
+    PROVISIONING_WAIT=$(jq -r 'if (.provisioning | type) == "object" and .provisioning.wait == false then "false" else "true" end' "$CONFIG_FILE")
+    PROVISIONING_TIMEOUT=$(jq -r 'if (.provisioning | type) == "object" then (.provisioning.timeout_seconds // 1800) else 1800 end' "$CONFIG_FILE")
     LOCAL_NETWORK=""
     WIFI_NET_PREFIX="192.168.100"
     WIFI_GATEWAY="${WIFI_NET_PREFIX}.1"
@@ -448,6 +450,159 @@ get_vm_ip() {
     return 1
 }
 
+# Non-interactive SSH to the guest; never blocks on prompts.
+vm_ssh() {
+    local ip="$1"
+    shift
+    local connect_timeout="${VM_SSH_CONNECT_TIMEOUT:-5}"
+    ssh -i "$SSH_KEY" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o BatchMode=yes \
+        -o ConnectTimeout="$connect_timeout" \
+        -o ServerAliveInterval=5 \
+        -o ServerAliveCountMax=2 \
+        -o LogLevel=ERROR \
+        "ubuntu@${ip}" "$@"
+}
+
+# Probe guest provisioning over SSH. Prints the last ">>>" step (or a READY
+# marker) and exits with:
+#   0   provisioning complete
+#  10   still provisioning
+#  11   cloud-init missing or disabled
+#  12   cloud-init reported an error
+# 255   SSH connection failure
+provisioning_state() {
+    local ip="$1"
+    local output rc=0
+    output=$(vm_ssh "$ip" 'bash -s' 2>/dev/null <<'REMOTE'
+sentinel=/var/lib/ai-korobok/provisioned
+if ! command -v cloud-init >/dev/null 2>&1; then
+    echo "cloud-init is not installed"
+    exit 11
+fi
+last_step=$(grep '^>>> ' /var/log/cloud-init-output.log 2>/dev/null | tail -n 1)
+cstatus=$(cloud-init status 2>/dev/null | sed -n 's/^status: //p')
+case "$cstatus" in
+    disabled)
+        echo "cloud-init is disabled"
+        exit 11
+        ;;
+    error)
+        echo "$last_step"
+        exit 12
+        ;;
+esac
+if [ -f "$sentinel" ]; then
+    marker_boot=$(cut -d' ' -f1 "$sentinel" 2>/dev/null)
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    # Require the sentinel to come from an earlier boot so the final
+    # cloud-init reboot has already happened before we report success.
+    if [ -n "$marker_boot" ] && [ "$marker_boot" != "$current_boot" ] && [ "$cstatus" = "done" ]; then
+        echo "READY"
+        exit 0
+    fi
+    echo "$last_step"
+    exit 10
+fi
+# No sentinel: accept an already provisioned VM created before the marker existed.
+if [ "$cstatus" = "done" ]; then
+    log_age=$(( $(date -u +%s) - $(stat -c %Y /var/log/cloud-init-output.log 2>/dev/null || echo 0) ))
+    if [ "$log_age" -gt 300 ]; then
+        echo "READY-LEGACY"
+        exit 0
+    fi
+fi
+echo "$last_step"
+exit 10
+REMOTE
+    ) || rc=$?
+    printf '%s' "$output"
+    return "$rc"
+}
+
+format_elapsed() {
+    local seconds="$1"
+    if (( seconds >= 60 )); then
+        printf '%dm%02ds' $((seconds / 60)) $((seconds % 60))
+    else
+        printf '%ds' "$seconds"
+    fi
+}
+
+# Wait until the guest finishes cloud-init provisioning. Sets PROVISIONED_IP
+# to the address that answered when it succeeds.
+wait_for_provisioning() {
+    local vm_ip="${1:-}"
+    local timeout="${2:-$PROVISIONING_TIMEOUT}"
+    local start_ts now_ts elapsed last_step="" last_heartbeat rc output failures=0
+    start_ts=$(date +%s)
+    last_heartbeat=$start_ts
+    PROVISIONED_IP=""
+
+    while true; do
+        now_ts=$(date +%s)
+        elapsed=$((now_ts - start_ts))
+        if (( elapsed >= timeout )); then
+            log_warn "Provisioning did not finish within $(format_elapsed "$timeout")."
+            return 1
+        fi
+
+        if [[ -z "$vm_ip" ]]; then
+            vm_ip=$(get_vm_ip 2>/dev/null || true)
+            if [[ -z "$vm_ip" ]]; then
+                sleep 5
+                continue
+            fi
+            log_info "VM IP: ${vm_ip}"
+        fi
+
+        rc=0
+        output=$(provisioning_state "$vm_ip") || rc=$?
+
+        case "$rc" in
+            0)
+                PROVISIONED_IP="$vm_ip"
+                log_info "Guest provisioning complete ($(format_elapsed "$elapsed"))."
+                return 0
+                ;;
+            11)
+                log_warn "cloud-init is not available in the guest; skipping the provisioning wait."
+                return 2
+                ;;
+            12)
+                log_error "cloud-init reported an error during provisioning."
+                log_warn "Inspect /var/log/cloud-init-output.log in the guest for details."
+                return 3
+                ;;
+            10)
+                failures=0
+                if [[ -n "$output" && "$output" != "$last_step" ]]; then
+                    log_info "Provisioning: ${output#>>> }"
+                    last_step="$output"
+                    last_heartbeat=$now_ts
+                elif (( now_ts - last_heartbeat >= 30 )); then
+                    log_info "Still provisioning ($(format_elapsed "$elapsed") elapsed)${last_step:+: ${last_step#>>> }}"
+                    last_heartbeat=$now_ts
+                fi
+                ;;
+            *)
+                failures=$((failures + 1))
+                if (( failures == 3 )); then
+                    log_warn "SSH is not available yet (the guest may be booting or rebooting); still waiting..."
+                fi
+                if (( failures % 6 == 0 )); then
+                    vm_ip=""
+                    last_step=""
+                fi
+                ;;
+        esac
+
+        sleep 5
+    done
+}
+
 check_port_available() {
     local port="$1"
     if ss -tlnp 2>/dev/null | grep -q ":${port} "; then
@@ -667,8 +822,44 @@ undefine_wifi_network() {
 }
 
 cmd_create() {
+    local wait_override=""
+    local timeout_override=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --no-wait) wait_override="false"; shift ;;
+            --wait)    wait_override="true"; shift ;;
+            --timeout)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--timeout requires a value in seconds."
+                    exit 1
+                fi
+                timeout_override="$2"
+                shift 2
+                ;;
+            --timeout=*) timeout_override="${1#*=}"; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *)
+                log_error "Unknown create option: $1"
+                exit 1
+                ;;
+        esac
+    done
+
     ensure_state_dir
     load_config
+
+    if [[ -n "$wait_override" ]]; then
+        PROVISIONING_WAIT="$wait_override"
+    fi
+    if [[ -n "$timeout_override" ]]; then
+        PROVISIONING_TIMEOUT="$timeout_override"
+    fi
+    if ! [[ "$PROVISIONING_TIMEOUT" =~ ^[0-9]+$ ]] || (( PROVISIONING_TIMEOUT <= 0 )); then
+        log_warn "Invalid provisioning timeout '${PROVISIONING_TIMEOUT}' — using 1800 seconds."
+        PROVISIONING_TIMEOUT=1800
+    fi
+
     detect_kvm
     detect_qemu_machine
     detect_ovmf
@@ -703,6 +894,38 @@ cmd_create() {
     else
         log_warn "Could not determine VM IP. Port forwarding skipped."
         log_warn "Try 'vm.sh status' later to get the IP, then restart to apply forwards."
+    fi
+
+    if [[ "$PROVISIONING_WAIT" != "true" ]]; then
+        log_warn "Provisioning wait disabled; guest dependencies may still be installing."
+        log_info "Monitor with: ./vm.sh status"
+        log_info "Guest log:    /var/log/cloud-init-output.log (via ./vm.sh ssh)"
+    elif [[ -z "$vm_ip" ]]; then
+        log_warn "No VM IP available — cannot wait for provisioning."
+    else
+        log_info "Waiting for guest provisioning to finish (timeout: $(format_elapsed "$PROVISIONING_TIMEOUT"))..."
+        local prov_rc=0
+        wait_for_provisioning "$vm_ip" || prov_rc=$?
+        case "$prov_rc" in
+            0)
+                if [[ -n "${PROVISIONED_IP:-}" && "${PROVISIONED_IP}" != "$vm_ip" ]]; then
+                    log_info "VM IP changed after the provisioning reboot (${vm_ip} -> ${PROVISIONED_IP}); re-applying port forwards..."
+                    remove_port_forwards
+                    apply_port_forwards "$PROVISIONED_IP"
+                fi
+                ;;
+            2)
+                ;;
+            3)
+                log_warn "The VM is running, but provisioning did not finish cleanly."
+                log_warn "Check ./vm.sh status and the guest's /var/log/cloud-init-output.log."
+                ;;
+            *)
+                log_warn "The VM is running, but provisioning is still in progress."
+                log_warn "Check progress with: ./vm.sh status"
+                log_warn "Guest log: /var/log/cloud-init-output.log"
+                ;;
+        esac
     fi
 
     echo ""
@@ -824,6 +1047,15 @@ cmd_ssh() {
     vm_ip=$(get_vm_ip 2>/dev/null) || true
 
     if [[ -n "$vm_ip" ]]; then
+        local prov_rc=0 prov_step=""
+        local VM_SSH_CONNECT_TIMEOUT=3
+        prov_step=$(provisioning_state "$vm_ip" 2>/dev/null) || prov_rc=$?
+        if [[ "$prov_rc" -eq 10 ]]; then
+            log_warn "Guest provisioning is still running${prov_step:+ (${prov_step#>>> })}; packages may be missing."
+            log_warn "Check progress with: ./vm.sh status"
+            log_warn "Guest log: /var/log/cloud-init-output.log"
+        fi
+
         log_info "SSH into ${VM_NAME} (${vm_ip})..."
         exec ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "ubuntu@${vm_ip}" "$@"
     else
@@ -907,6 +1139,35 @@ cmd_status() {
             echo "  IP Address: ${vm_ip}"
         else
             echo "  IP Address: (waiting for DHCP...)"
+        fi
+
+        if [[ -n "$vm_ip" ]]; then
+            local prov_rc=0 prov_state=""
+            local VM_SSH_CONNECT_TIMEOUT=3
+            prov_state=$(provisioning_state "$vm_ip" 2>/dev/null) || prov_rc=$?
+            case "$prov_rc" in
+                0)
+                    if [[ "$prov_state" == "READY-LEGACY" ]]; then
+                        echo "  Provisioning: complete (legacy VM, no marker file)"
+                    else
+                        echo "  Provisioning: complete"
+                    fi
+                    ;;
+                10)
+                    echo "  Provisioning: in progress${prov_state:+ (${prov_state#>>> })}"
+                    ;;
+                11)
+                    echo "  Provisioning: unknown (cloud-init not available)"
+                    ;;
+                12)
+                    echo "  Provisioning: error (see /var/log/cloud-init-output.log)"
+                    ;;
+                *)
+                    echo "  Provisioning: starting (SSH not ready)"
+                    ;;
+            esac
+        else
+            echo "  Provisioning: starting (no IP yet)"
         fi
 
         echo ""
@@ -1048,7 +1309,9 @@ usage() {
     echo "Usage: $(basename "$0") <command>"
     echo ""
     echo "Commands:"
-    echo "  create      Download cloud image, create VM, and start it"
+    echo "  create [--no-wait] [--timeout <sec>]"
+    echo "              Download cloud image, create VM, start it, and wait for provisioning"
+    echo "              (--no-wait returns after boot; --timeout overrides the config value)"
     echo "  start       Start an existing stopped VM"
     echo "  stop        Graceful ACPI shutdown"
     echo "  destroy     Force stop, undefine, and delete disk images"
@@ -1066,7 +1329,7 @@ main() {
     shift || true
 
     case "$command" in
-        create)     cmd_create ;;
+        create)     cmd_create "$@" ;;
         start)      cmd_start ;;
         stop)       cmd_stop ;;
         destroy)    cmd_destroy ;;
