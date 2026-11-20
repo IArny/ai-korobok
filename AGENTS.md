@@ -114,3 +114,10 @@ Do not test lifecycle/destructive changes (`create`, `start`, `stop`, `destroy`,
 - Keep messages in the existing terse, lowercase style (e.g. `add wifi bridge to access local network`).
 - The working tree may contain local modifications (e.g. a rendered `cloud-init/user-data`);
   verify with `git status` before staging.
+
+## Changelog
+
+Release notes live in `changelog/<version>.md`, one file per version. The index is
+`changelog/README.md`. When writing a changelog entry, follow the structure of the
+existing files (sections: Added / Changed / Fixed, short bullets, no fluff). Add the
+new entry to the top of the `Releases` list in `changelog/README.md`.

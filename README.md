@@ -437,8 +437,7 @@ those separately if you need the agent state on the new host.
 
 ## Changelog
 
-Release notes live in [changelog/](changelog/); see
-[0.1.0](changelog/0.1.0.md) for the current version.
+Release notes live in [changelog/README.md](changelog/README.md).
 
 ## Project Structure
 
