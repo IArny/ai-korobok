@@ -451,12 +451,11 @@ generate_domain_xml() {
       <source network='${virsh_net_name}'/>
       <model type='virtio'/>
     </interface>"
-    else
-        network_block="    <interface type='network'>
+    fi
+    network_block+="    <interface type='network'>
       <source network='default'/>
       <model type='virtio'/>
     </interface>"
-    fi
 
     if [[ -n "$SHARED_HOST_PATH" ]] && [[ -n "$SHARED_MOUNT_TAG" ]]; then
         mkdir -p "$SHARED_HOST_PATH"
@@ -1018,33 +1017,18 @@ persist_sync_from_guest() {
 
 persist_push_to_guest() {
     local ip="$1"
-    local mirror="${PERSIST_HOST_PATH}/guest"
+    local mirror="${PERSIST_HOST_PATH}/guest/home/ubuntu"
     local manifest="${PERSIST_HOST_PATH}/manifest.json"
 
     if [[ ! -f "$manifest" || ! -d "$mirror" ]]; then
         return 0
     fi
 
-    if ! tar czf - -C "$mirror" . | vm_ssh "$ip" 'sudo tar xzf - -C / --owner=ubuntu --group=ubuntu --exclude=authorized_keys'; then
+    if ! tar czf - -C "$mirror" . | vm_ssh "$ip" 'sudo tar xzf - -C /home/ubuntu --exclude=authorized_keys && sudo chown -R ubuntu:ubuntu /home/ubuntu'; then
         log_error "Failed to restore agent state into ${VM_NAME}."
         return 1
     fi
 
-    local home_paths=()
-    mapfile -t home_paths < <(jq -r '.included_paths[]?' "$manifest" | grep '^/home/' || true)
-    if [[ ${#home_paths[@]} -gt 0 ]]; then
-        {
-            echo 'paths=('
-            printf '%q\n' "${home_paths[@]}"
-            echo ')'
-            cat <<'REMOTE'
-for p in "${paths[@]}"; do
-    [ -e "$p" ] || continue
-    sudo chown -R ubuntu:ubuntu "$p"
-done
-REMOTE
-        } | vm_ssh "$ip" 'bash -s' >/dev/null || log_warn "Could not fix ownership for all restored paths."
-    fi
 
     local volume
     for volume in $(jq -r '.docker_volumes[]?' "$manifest"); do
